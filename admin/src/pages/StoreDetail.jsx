@@ -2,7 +2,339 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, fmtDate, inr } from '../api.js';
 
-const TABS = ['Dashboard', 'Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Payments', 'Devices'];
+const TABS = ['Dashboard', 'Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Doctors', 'Payments', 'Returns', 'Settings', 'Devices'];
+
+function parseMaybeJson(value) {
+  if (value == null || value === '') return null;
+  if (typeof value === 'object') return value;
+  const raw = String(value).trim();
+  if (!raw.startsWith('{') && !raw.startsWith('[')) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function FieldGrid({ rows }) {
+  return (
+    <div className="settings-fields">
+      {rows.map(([label, val]) => (
+        <div key={label} className="settings-field">
+          <div className="muted settings-field-label">{label}</div>
+          <div className="settings-field-value">{val == null || val === '' ? '—' : String(val)}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ChipList({ items }) {
+  const list = Array.isArray(items) ? items.filter((x) => x != null && String(x).trim() !== '') : [];
+  if (!list.length) return <span className="muted">—</span>;
+  return (
+    <div className="chip-row">
+      {list.map((item) => (
+        <span key={String(item)} className="chip">{String(item)}</span>
+      ))}
+    </div>
+  );
+}
+
+function AccessControlPanel({ store, onSave }) {
+  const [isActive, setIsActive] = useState(Boolean(store.is_active));
+  const [applyExpiry, setApplyExpiry] = useState(store.apply_expiry_check !== false);
+  const [expiryEnabled, setExpiryEnabled] = useState(Boolean(store.expiry_enabled));
+  const [expiryDate, setExpiryDate] = useState(
+    store.expiry_date ? String(store.expiry_date).slice(0, 10) : '',
+  );
+  const [activationDate, setActivationDate] = useState(
+    store.activation_date ? String(store.activation_date).slice(0, 10) : '',
+  );
+  const [saving, setSaving] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => {
+    setIsActive(Boolean(store.is_active));
+    setApplyExpiry(store.apply_expiry_check !== false);
+    setExpiryEnabled(Boolean(store.expiry_enabled));
+    setExpiryDate(store.expiry_date ? String(store.expiry_date).slice(0, 10) : '');
+    setActivationDate(store.activation_date ? String(store.activation_date).slice(0, 10) : '');
+  }, [store]);
+
+  async function save() {
+    setSaving(true);
+    setMsg('');
+    try {
+      await onSave({
+        is_active: isActive,
+        apply_expiry_check: applyExpiry,
+        expiry_enabled: expiryEnabled,
+        expiry_date: expiryDate || null,
+        activation_date: activationDate || null,
+      });
+      setMsg('Access settings saved. Online devices use this immediately.');
+    } catch (e) {
+      setMsg(e.message || 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="panel-h" style={{ padding: '0 0 12px' }}>
+        <h3 style={{ margin: 0 }}>Access &amp; license</h3>
+        <span className={`badge ${store.is_active ? 'ok' : 'off'}`}>
+          {store.is_active ? 'Access ON' : 'Access OFF'}
+        </span>
+      </div>
+      <div className="settings-fields" style={{ marginBottom: 12 }}>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Activation date</div>
+          <input
+            type="date"
+            value={activationDate}
+            onChange={(e) => setActivationDate(e.target.value)}
+            style={{
+              background: 'var(--bg2)',
+              border: '1px solid var(--line)',
+              color: 'var(--text)',
+              padding: '8px 10px',
+              borderRadius: 8,
+              width: '100%',
+            }}
+          />
+          <div className="muted" style={{ fontSize: '0.75rem', marginTop: 4 }}>
+            Separate from expiry — set for old stores if missing
+          </div>
+        </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Turn off access</div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={isActive}
+              onChange={(e) => setIsActive(e.target.checked)}
+            />
+            Store active (uncheck to block Online PC / Android)
+          </label>
+        </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Apply expiry check</div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={applyExpiry}
+              onChange={(e) => setApplyExpiry(e.target.checked)}
+            />
+            Enforce expiry date from server
+          </label>
+        </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Expiry enabled</div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={expiryEnabled}
+              onChange={(e) => setExpiryEnabled(e.target.checked)}
+            />
+            Expiry date is active
+          </label>
+        </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Expiry date</div>
+          <input
+            type="date"
+            className="settings-input"
+            value={expiryDate}
+            onChange={(e) => setExpiryDate(e.target.value)}
+            style={{
+              background: 'var(--bg2)',
+              border: '1px solid var(--line)',
+              color: 'var(--text)',
+              padding: '8px 10px',
+              borderRadius: 8,
+              width: '100%',
+            }}
+          />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+        <button className="btn sm" disabled={saving} onClick={save}>
+          {saving ? 'Saving…' : 'Save access settings'}
+        </button>
+        {msg && <span className="muted" style={{ fontSize: '0.85rem' }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+function SettingsView({ list }) {
+  const profile = list.profile || null;
+  const dropdowns = list.dropdowns || null;
+  const shelf = list.shelf_settings || null;
+  const settings = list.settings || [];
+
+  const billingPref = useMemo(() => {
+    const row = settings.find((s) => s.name === 'billing_layout_prefs');
+    if (!row) return null;
+    return parseMaybeJson(row.value);
+  }, [settings]);
+
+  const otherKv = settings.filter((s) => s.name !== 'billing_layout_prefs');
+
+  return (
+    <div style={{ padding: 16, display: 'grid', gap: 16 }}>
+      <section>
+        <div className="panel-h" style={{ padding: '0 0 10px' }}>
+          <h3 style={{ margin: 0 }}>Pharmacy profile</h3>
+          {profile && (
+            <span className="muted mono" style={{ fontSize: '0.78rem' }}>
+              v{profile.version ?? 1}
+              {profile.updated_at ? ` · ${new Date(profile.updated_at).toLocaleString()}` : ''}
+            </span>
+          )}
+        </div>
+        {profile ? (
+          <FieldGrid
+            rows={[
+              ['Name', profile.name],
+              ['Address', profile.address],
+              ['Phone', profile.phone],
+              ['Email', profile.email],
+              ['GSTIN', profile.gstin],
+              ['DL number', profile.dl_number],
+              ['GST enabled', profile.gst_enabled == null ? '—' : (profile.gst_enabled ? 'Yes' : 'No')],
+              ['Device', profile.device_id],
+            ]}
+          />
+        ) : (
+          <div className="empty">No pharmacy profile synced</div>
+        )}
+      </section>
+
+      <section>
+        <div className="panel-h" style={{ padding: '0 0 10px' }}>
+          <h3 style={{ margin: 0 }}>Dropdowns / lists</h3>
+          {dropdowns?.updated_at && (
+            <span className="muted mono" style={{ fontSize: '0.78rem' }}>
+              {new Date(dropdowns.updated_at).toLocaleString()}
+            </span>
+          )}
+        </div>
+        {dropdowns ? (
+          <div style={{ display: 'grid', gap: 12 }}>
+            <div>
+              <div className="muted settings-field-label">Villages</div>
+              <ChipList items={dropdowns.villages} />
+              <div className="muted" style={{ marginTop: 6, fontSize: '0.8rem' }}>
+                Default: {dropdowns.default_village || '—'}
+              </div>
+            </div>
+            <div>
+              <div className="muted settings-field-label">Medicine types</div>
+              <ChipList items={dropdowns.med_types} />
+            </div>
+            <div>
+              <div className="muted settings-field-label">Schedules</div>
+              <ChipList items={dropdowns.schedules} />
+            </div>
+          </div>
+        ) : (
+          <div className="empty">No dropdowns synced</div>
+        )}
+      </section>
+
+      <section>
+        <div className="panel-h" style={{ padding: '0 0 10px' }}>
+          <h3 style={{ margin: 0 }}>Shelf settings</h3>
+          {shelf && (
+            <span className="muted mono" style={{ fontSize: '0.78rem' }}>
+              v{shelf.version ?? 1}
+              {shelf.updated_at ? ` · ${new Date(shelf.updated_at).toLocaleString()}` : ''}
+            </span>
+          )}
+        </div>
+        {shelf ? (
+          <FieldGrid
+            rows={[
+              ['Show location on sales', shelf.show_location ? 'Yes' : 'No'],
+              ['Device', shelf.device_id],
+            ]}
+          />
+        ) : (
+          <div className="empty">No shelf settings</div>
+        )}
+      </section>
+
+      <section>
+        <div className="panel-h" style={{ padding: '0 0 10px' }}>
+          <h3 style={{ margin: 0 }}>Billing layout &amp; FY (Mac2)</h3>
+          {billingPref?.updated_at && (
+            <span className="muted mono" style={{ fontSize: '0.78rem' }}>
+              v{billingPref.version ?? 1} · {new Date(billingPref.updated_at).toLocaleString()}
+            </span>
+          )}
+        </div>
+        {billingPref ? (
+          <FieldGrid
+            rows={[
+              ['History scope', billingPref.history_scope],
+              ['Payment mode enabled', billingPref.payment_mode_enabled ? 'Yes' : 'No'],
+              ['Payment position', billingPref.payment_mode_position],
+              ['Item discount mode', billingPref.item_discount_mode],
+              ['Show margin column', billingPref.billing_show_margin_column ? 'Yes' : 'No'],
+              ['Show total margin', billingPref.billing_show_total_margin ? 'Yes' : 'No'],
+              ['Margin loss warning', billingPref.billing_margin_loss_warning ? 'Yes' : 'No'],
+            ]}
+          />
+        ) : (
+          <div className="empty">Not synced yet (saved from Mac2 Online)</div>
+        )}
+      </section>
+
+      <section>
+        <div className="panel-h" style={{ padding: '0 0 10px' }}>
+          <h3 style={{ margin: 0 }}>Other settings (KV)</h3>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Value</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {otherKv.map((s) => {
+              const parsed = parseMaybeJson(s.value);
+              return (
+                <tr key={s.name}>
+                  <td className="mono">{s.name}</td>
+                  <td>
+                    {parsed ? (
+                      <details>
+                        <summary className="muted">JSON object</summary>
+                        <pre className="mono settings-json">{JSON.stringify(parsed, null, 2)}</pre>
+                      </details>
+                    ) : (
+                      <span className="mono" style={{ wordBreak: 'break-word' }}>{s.value || '—'}</span>
+                    )}
+                  </td>
+                  <td className="muted">{s.updated_at ? new Date(s.updated_at).toLocaleString() : '—'}</td>
+                </tr>
+              );
+            })}
+            {!otherKv.length && (
+              <tr><td colSpan={3} className="empty">No other KV settings</td></tr>
+            )}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
 
 export default function StoreDetail() {
   const { id } = useParams();
@@ -39,7 +371,10 @@ export default function StoreDetail() {
         else if (tab === 'Inventory') path = `/admin/stores/${id}/inventory?${params}`;
         else if (tab === 'Customers') path = `/admin/stores/${id}/customers?${params}`;
         else if (tab === 'Suppliers') path = `/admin/stores/${id}/suppliers?${params}`;
+        else if (tab === 'Doctors') path = `/admin/stores/${id}/doctors?${params}`;
         else if (tab === 'Payments') path = `/admin/stores/${id}/payments/customers`;
+        else if (tab === 'Returns') path = `/admin/stores/${id}/returns/sales`;
+        else if (tab === 'Settings') path = `/admin/stores/${id}/settings`;
         if (!path) return;
         const res = await api(path);
         if (!cancelled) { setList(res); setDetail(null); }
@@ -60,6 +395,13 @@ export default function StoreDetail() {
     } catch (e) {
       setError(e.message);
     }
+  }
+
+  async function saveAccess(patch) {
+    setError('');
+    const store = await api(`/admin/stores/${id}`, { method: 'PATCH', body: patch });
+    setData((d) => ({ ...d, store }));
+    return store;
   }
 
   async function openSale(localId) {
@@ -105,6 +447,8 @@ export default function StoreDetail() {
           )}
         </div>
       </div>
+
+      <AccessControlPanel store={store} onSave={saveAccess} />
 
       <div className="tabs">
         {TABS.map((t) => (
@@ -203,9 +547,9 @@ export default function StoreDetail() {
         </>
       )}
 
-      {['Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Payments'].includes(tab) && (
+      {['Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Doctors', 'Payments', 'Returns', 'Settings'].includes(tab) && (
         <>
-          {tab !== 'Payments' && (
+          {['Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Doctors'].includes(tab) && (
             <div className="toolbar">
               <input placeholder={`Search ${tab.toLowerCase()}…`} value={q} onChange={(e) => setQ(e.target.value)} />
             </div>
@@ -323,6 +667,20 @@ export default function StoreDetail() {
                   </tbody>
                 </table>
               )}
+              {tab === 'Doctors' && (
+                <table>
+                  <thead><tr><th>Name</th><th>Phone</th><th>Reg. No</th></tr></thead>
+                  <tbody>
+                    {(list?.rows || []).map((d) => (
+                      <tr key={d.id}>
+                        <td>{d.name}</td>
+                        <td className="mono">{d.phone || '—'}</td>
+                        <td className="mono">{d.registration_number || '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
               {tab === 'Payments' && (
                 <table>
                   <thead><tr><th>Date</th><th>Customer</th><th>Mode</th><th className="right">Amount</th></tr></thead>
@@ -338,7 +696,26 @@ export default function StoreDetail() {
                   </tbody>
                 </table>
               )}
-              {!list?.rows?.length && <div className="empty">No records</div>}
+              {tab === 'Returns' && (
+                <table>
+                  <thead><tr><th>Return No</th><th>Bill</th><th>Customer</th><th>Date</th><th className="right">Refund</th></tr></thead>
+                  <tbody>
+                    {(list?.rows || []).map((r) => (
+                      <tr key={r.id}>
+                        <td className="mono">{r.return_no}</td>
+                        <td className="mono">{r.bill_no || '—'}</td>
+                        <td>{r.customer_name || '—'}</td>
+                        <td>{fmtDate(r.return_date)}</td>
+                        <td className="right mono">{inr(r.refund_amount)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {tab === 'Settings' && list && (
+                <SettingsView list={list} />
+              )}
+              {tab !== 'Settings' && !list?.rows?.length && <div className="empty">No records</div>}
             </div>
           </div>
         </>

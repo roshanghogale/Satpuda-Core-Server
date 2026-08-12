@@ -1,14 +1,32 @@
 import pg from 'pg';
 import { config } from '../config/index.js';
 
-const { Pool } = pg;
+const { Pool, types } = pg;
+
+// node-pg returns BIGINT (int8) as strings by default — coerce to Number so
+// Android/Mac clients can parse customer_id / supplier_id without string casts.
+types.setTypeParser(types.builtins.INT8, (val) => {
+  if (val === null || val === undefined) return val;
+  const n = Number(val);
+  return Number.isSafeInteger(n) ? n : val;
+});
+// NUMERIC also arrives as string; keep as Number when safe for sync payloads.
+types.setTypeParser(types.builtins.NUMERIC, (val) => {
+  if (val === null || val === undefined) return val;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : val;
+});
+// DATE must stay YYYY-MM-DD. Default node-pg → JS Date → JSON becomes
+// "2026-08-10T00:00:00.000Z", which breaks Android history labels/filters.
+types.setTypeParser(types.builtins.DATE, (val) => val);
 
 export const pool = new Pool({
   connectionString: config.databaseUrl,
   max: config.pgPoolMax,
   idleTimeoutMillis: 30_000,
   connectionTimeoutMillis: 10_000,
-  statement_timeout: 60_000,
+  // Large store pulls/pushes (sales + nested items) need more headroom than 60s.
+  statement_timeout: 180_000,
 });
 
 pool.on('error', (err) => {

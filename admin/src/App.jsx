@@ -4,6 +4,7 @@ import { api, clearToken, getToken, setToken } from './api.js';
 import Overview from './pages/Overview.jsx';
 import Stores from './pages/Stores.jsx';
 import StoreDetail from './pages/StoreDetail.jsx';
+import MasterMedicines from './pages/MasterMedicines.jsx';
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('admin');
@@ -66,6 +67,9 @@ function Shell({ admin, onLogout, children }) {
         <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/stores">
           Stores
         </NavLink>
+        <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/master-medicines">
+          Master medicines
+        </NavLink>
         <div style={{ flex: 1 }} />
         <button className="btn ghost sm" onClick={onLogout}>Sign out</button>
       </aside>
@@ -108,6 +112,7 @@ export default function App() {
         <Route path="/" element={<Overview />} />
         <Route path="/stores" element={<Stores />} />
         <Route path="/stores/:id" element={<StoreDetail />} />
+        <Route path="/master-medicines" element={<MasterMedicines />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Shell>

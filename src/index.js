@@ -1,3 +1,4 @@
+import http from 'http';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -11,6 +12,8 @@ import { errorMiddleware } from './utils/http.js';
 import authRoutes from './routes/auth.js';
 import syncRoutes from './routes/sync.js';
 import adminRoutes from './routes/admin.js';
+import masterMedicineRoutes from './routes/masterMedicines.js';
+import { attachSyncHub } from './ws/syncHub.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -28,18 +31,31 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 app.use(morgan(config.env === 'production' ? 'combined' : 'dev'));
 
-app.use(
-  '/api/',
-  rateLimit({
-    windowMs: 60_000,
-    max: 600,
-    standardHeaders: true,
-    legacyHeaders: false,
-  })
-);
+// General API budget (auth, admin, health). Sync uses a higher ceiling because
+// store pull/push is page-based and can legitimately issue many requests/min.
+const generalLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: 'Too many requests. Slow down and retry.' },
+  skip: (req) => String(req.originalUrl || '').startsWith('/api/sync'),
+});
+const syncLimiter = rateLimit({
+  windowMs: 60_000,
+  max: 3000,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: 'Too many sync requests. Slow down and retry.' },
+});
+
+app.use('/api/', generalLimiter);
+app.use('/api/sync', syncLimiter);
+app.use('/api/master-medicines', syncLimiter);
 
 app.use('/api', authRoutes);
 app.use('/api/sync', syncRoutes);
+app.use('/api/master-medicines', masterMedicineRoutes);
 app.use('/api/admin', adminRoutes);
 
 // Serve admin dashboard (built assets under /admin/)
@@ -64,12 +80,16 @@ app.get('/', (_req, res) => {
     docs: '/api/meta',
     admin: '/admin',
     health: '/api/health',
+    ws_sync: '/ws/sync',
   });
 });
 
 app.use(errorMiddleware);
 
-app.listen(config.port, config.host, () => {
+const server = http.createServer(app);
+attachSyncHub(server);
+
+server.listen(config.port, config.host, () => {
   console.log(`[satpuda] listening on http://${config.host}:${config.port}`);
   console.log(`[satpuda] env=${config.env}`);
 });

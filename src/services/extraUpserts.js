@@ -1,7 +1,13 @@
 /**
  * Extra collection upserts: shelves, disposals, orders, general products, medicine_suppliers, settings.
  */
-import { upsertSimple, syncMeta, localIdOf, shouldAcceptIncoming } from './upsertHelper.js';
+import {
+  upsertSimple,
+  syncMeta,
+  localIdOf,
+  shouldAcceptIncoming,
+  writeTimestamp,
+} from './upsertHelper.js';
 import { parseTs, toBool } from '../utils/fy.js';
 
 const num = (v) => (v == null || v === '' ? null : Number(v));
@@ -141,71 +147,64 @@ export async function upsertMedicineSupplier(client, storePk, doc) {
 }
 
 export async function upsertShelfSettings(client, storePk, doc) {
+  const showLocation = toBool(doc.show_location);
+  const version = Number(doc.version || 1);
+  const deviceId = doc.device_id || null;
+  const { rows } = await client.query(
+    `SELECT show_location, version, device_id, updated_at FROM shelf_settings WHERE store_pk=$1`,
+    [storePk]
+  );
+  const existing = rows[0];
+  if (
+    existing &&
+    toBool(existing.show_location) === showLocation &&
+    Number(existing.version || 1) === version &&
+    String(existing.device_id || '') === String(deviceId || '')
+  ) {
+    return { id: storePk, status: 'skipped' };
+  }
+  const meta = syncMeta(doc);
+  const writeAt = writeTimestamp(meta, existing);
   await client.query(
     `INSERT INTO shelf_settings (store_pk, show_location, updated_at, version, device_id)
-     VALUES ($1,$2,NOW(),$3,$4)
+     VALUES ($1,$2,$3,$4,$5)
      ON CONFLICT (store_pk) DO UPDATE SET
-       show_location=EXCLUDED.show_location, updated_at=NOW(),
+       show_location=EXCLUDED.show_location, updated_at=EXCLUDED.updated_at,
        version=EXCLUDED.version, device_id=EXCLUDED.device_id`,
-    [storePk, toBool(doc.show_location), Number(doc.version || 1), doc.device_id || null]
+    [storePk, showLocation, writeAt, version, deviceId]
   );
   return { id: storePk, status: 'upserted' };
 }
 
 export async function upsertSettingsKv(client, storePk, docs) {
   const list = Array.isArray(docs) ? docs : [docs];
-  let n = 0;
+  let upserted = 0;
+  let skipped = 0;
   for (const doc of list) {
     const name = doc.name || doc.key;
     if (!name) continue;
+    const value = doc.value == null ? null : String(doc.value);
+    const { rows } = await client.query(
+      `SELECT value FROM store_settings WHERE store_pk=$1 AND name=$2`,
+      [storePk, String(name)]
+    );
+    if (rows[0] && String(rows[0].value ?? '') === String(value ?? '')) {
+      skipped++;
+      continue;
+    }
     await client.query(
       `INSERT INTO store_settings (store_pk, name, value, updated_at)
        VALUES ($1,$2,$3,NOW())
        ON CONFLICT (store_pk, name) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
-      [storePk, String(name), doc.value == null ? null : String(doc.value)]
+      [storePk, String(name), value]
     );
-    n++;
+    upserted++;
   }
-  return { results: [], upserted: n, skipped: 0 };
+  return { results: [], upserted, skipped };
 }
 
-export async function upsertMedicineMaster(client, storePk, doc) {
-  const localId = localIdOf(doc);
-  const meta = syncMeta(doc);
-  const existing = await client.query(
-    `SELECT version, updated_at, device_id, deleted FROM medicines_master
-     WHERE store_pk IS NOT DISTINCT FROM $1 AND local_id=$2`,
-    [storePk, localId]
-  );
-  if (shouldAcceptIncoming(existing.rows[0], meta) === 'skip') {
-    return { id: localId, status: 'skipped' };
-  }
-  if (existing.rows[0]) {
-    await client.query(
-      `UPDATE medicines_master SET
-         name=$3, manufacturer=$4, mrp=$5, content_drug=$6, med_type=$7, pack_size=$8,
-         updated_at=$9, version=$10, device_id=$11, deleted=$12, sync_status=$13
-       WHERE store_pk IS NOT DISTINCT FROM $1 AND local_id=$2`,
-      [
-        storePk, localId, String(doc.name || '').toUpperCase(),
-        doc.manufacturer || null, doc.mrp ?? null, doc.content_drug || null,
-        doc.med_type || doc.type || null, doc.pack_size || null,
-        meta.updated_at, meta.version, meta.device_id, meta.deleted, meta.sync_status,
-      ]
-    );
-  } else {
-    await client.query(
-      `INSERT INTO medicines_master (
-         store_pk, local_id, name, manufacturer, mrp, content_drug, med_type, pack_size,
-         created_at, updated_at, version, device_id, deleted, sync_status
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW(),$9,$10,$11,$12,$13)`,
-      [
-        storePk, localId, String(doc.name || '').toUpperCase(),
-        doc.manufacturer || null, doc.mrp ?? null, doc.content_drug || null,
-        doc.med_type || doc.type || null, doc.pack_size || null,
-        meta.updated_at, meta.version, meta.device_id, meta.deleted, meta.sync_status,
-      ]
-    );
-  }
-  return { id: localId, status: 'upserted' };
+/** @deprecated Use masterMedicineService.upsertGlobalMasterDoc — store sync no longer writes master. */
+export async function upsertMedicineMaster(_client, _storePk, doc) {
+  const { upsertGlobalMasterDoc } = await import('./masterMedicineService.js');
+  return upsertGlobalMasterDoc(_client, { ...doc, _enrich: true });
 }

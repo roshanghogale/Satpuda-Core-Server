@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { asyncHandler, ok } from '../utils/http.js';
 import { requireAdmin } from '../middleware/auth.js';
 import * as admin from '../services/adminService.js';
+import * as master from '../services/masterMedicineService.js';
 import { query } from '../db/pool.js';
 
 const router = Router();
@@ -104,6 +105,88 @@ router.get('/stores/:id/payments/suppliers', asyncHandler(async (req, res) => {
     [store.id]
   );
   ok(res, { rows });
+}));
+
+router.get('/stores/:id/doctors', asyncHandler(async (req, res) => {
+  const store = await admin.getStore(req.params.id);
+  const q = req.query.q ? `%${req.query.q}%` : null;
+  const { rows } = await query(
+    q
+      ? `SELECT local_id AS id, name, phone, registration_number, created_at
+         FROM doctors WHERE store_pk=$1 AND NOT deleted AND name ILIKE $2
+         ORDER BY name LIMIT 500`
+      : `SELECT local_id AS id, name, phone, registration_number, created_at
+         FROM doctors WHERE store_pk=$1 AND NOT deleted ORDER BY name LIMIT 500`,
+    q ? [store.id, q] : [store.id]
+  );
+  ok(res, { rows });
+}));
+
+router.get('/stores/:id/returns/sales', asyncHandler(async (req, res) => {
+  const store = await admin.getStore(req.params.id);
+  const { rows } = await query(
+    `SELECT local_id AS id, return_no, bill_no, customer_name, return_date, refund_amount, item_count
+     FROM sales_returns WHERE store_pk=$1 AND NOT deleted
+     ORDER BY return_date DESC, local_id DESC LIMIT 200`,
+    [store.id]
+  );
+  ok(res, { rows });
+}));
+
+router.get('/stores/:id/returns/purchases', asyncHandler(async (req, res) => {
+  const store = await admin.getStore(req.params.id);
+  const { rows } = await query(
+    `SELECT local_id AS id, return_no, purchase_no, supplier_name, return_date, refund_amount, item_count
+     FROM purchase_returns WHERE store_pk=$1 AND NOT deleted
+     ORDER BY return_date DESC, local_id DESC LIMIT 200`,
+    [store.id]
+  );
+  ok(res, { rows });
+}));
+
+router.get('/stores/:id/settings', asyncHandler(async (req, res) => {
+  const store = await admin.getStore(req.params.id);
+  const [profile, dropdowns, settings, shelf] = await Promise.all([
+    query(`SELECT * FROM pharmacy_profiles WHERE store_pk=$1`, [store.id]),
+    query(`SELECT * FROM store_dropdowns WHERE store_pk=$1`, [store.id]),
+    query(`SELECT name, value, updated_at FROM store_settings WHERE store_pk=$1 ORDER BY name`, [store.id]),
+    query(`SELECT * FROM shelf_settings WHERE store_pk=$1`, [store.id]),
+  ]);
+  ok(res, {
+    profile: profile.rows[0] || null,
+    dropdowns: dropdowns.rows[0] || null,
+    settings: settings.rows,
+    shelf_settings: shelf.rows[0] || null,
+  });
+}));
+
+// ─── Global master medicines ──────────────────────────────────────────────────
+
+router.get('/master-medicines', asyncHandler(async (req, res) => {
+  const docs = await master.exportGlobalMaster({
+    q: req.query.q || '',
+    limit: Number(req.query.limit) || 200,
+  });
+  ok(res, { docs, count: docs.length, total: await master.countGlobalMaster() });
+}));
+
+router.get('/master-medicines/export', asyncHandler(async (_req, res) => {
+  const docs = await master.exportGlobalMaster({});
+  ok(res, { docs, count: docs.length, total: docs.length });
+}));
+
+router.post('/master-medicines/upsert', asyncHandler(async (req, res) => {
+  const docs = Array.isArray(req.body?.docs) ? req.body.docs : [];
+  ok(res, await master.upsertGlobalMasterBatch(docs, { enrich: !!req.body?.enrich }));
+}));
+
+router.post('/master-medicines/merge-from-store/:storePk', asyncHandler(async (req, res) => {
+  const store = await admin.getStore(req.params.storePk);
+  ok(res, await master.mergeFromStoreInventory(store.id));
+}));
+
+router.post('/master-medicines/migrate-store-scoped', asyncHandler(async (_req, res) => {
+  ok(res, await master.migrateStoreScopedToGlobal());
 }));
 
 export default router;

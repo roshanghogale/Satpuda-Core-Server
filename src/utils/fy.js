@@ -3,14 +3,21 @@ import crypto from 'crypto';
 /** Indian FY helpers — mirrors mac2/core/fy_serial.py */
 
 export function fyStartYearForDate(value) {
-  let d;
-  if (!value) d = new Date();
-  else if (value instanceof Date) d = value;
-  else {
-    const raw = String(value).trim().slice(0, 10);
-    d = new Date(raw + 'T00:00:00');
-    if (Number.isNaN(d.getTime())) d = new Date();
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const year = value.getFullYear();
+    const month = value.getMonth() + 1;
+    return month >= 4 ? year : year - 1;
   }
+  if (value != null && value !== '') {
+    const raw = String(value).trim().slice(0, 10);
+    const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) {
+      const year = Number(m[1]);
+      const month = Number(m[2]);
+      return month >= 4 ? year : year - 1;
+    }
+  }
+  const d = new Date();
   const year = d.getFullYear();
   const month = d.getMonth() + 1;
   return month >= 4 ? year : year - 1;
@@ -67,6 +74,23 @@ export function parseTs(v) {
   if (v instanceof Date) return v;
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Accept YYYY-MM-DD (or ISO); return null for junk like "-12-01". */
+export function parseDateOnly(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) {
+    if (Number.isNaN(v.getTime())) return null;
+    return v.toISOString().slice(0, 10);
+  }
+  const s = String(v).trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  if (y < 1990 || y > 2100 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return `${m[1]}-${m[2]}-${m[3]}`;
 }
 
 export function slugifyStoreId(name) {

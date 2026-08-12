@@ -63,6 +63,22 @@ export async function updateStore(idOrSlug, patch) {
       vals.push(patch[key]);
     }
   }
+  if (patch.expiry_enabled !== undefined) {
+    fields.push(`expiry_enabled = $${i++}`);
+    vals.push(Boolean(patch.expiry_enabled));
+  }
+  if (patch.apply_expiry_check !== undefined) {
+    fields.push(`apply_expiry_check = $${i++}`);
+    vals.push(Boolean(patch.apply_expiry_check));
+  }
+  if (patch.expiry_date !== undefined) {
+    fields.push(`expiry_date = $${i++}`);
+    vals.push(patch.expiry_date ? String(patch.expiry_date).slice(0, 10) : null);
+  }
+  if (patch.activation_date !== undefined) {
+    fields.push(`activation_date = $${i++}`);
+    vals.push(patch.activation_date ? String(patch.activation_date).slice(0, 10) : null);
+  }
   if (!fields.length) return store;
   fields.push('updated_at = NOW()');
   vals.push(store.id);

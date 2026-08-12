@@ -9,8 +9,9 @@ import {
   pullCollection,
   pullAll,
   allocateFySerial,
+  softDeleteDoc,
 } from '../services/syncService.js';
-import { query } from '../db/pool.js';
+import { getSyncStatus, getChanges, getChangesFull } from '../services/syncRevision.js';
 
 const router = Router();
 router.use(requireStore);
@@ -33,6 +34,19 @@ router.get('/', asyncHandler(async (req, res) => {
     since: req.query.since || null,
     server_time: new Date().toISOString(),
   });
+}));
+
+/** Option B: safety-poll head revision (WebSocket backup) */
+router.get('/status', asyncHandler(async (req, res) => {
+  ok(res, await getSyncStatus(await storePk(req)));
+}));
+
+/** Option B: pull changelog rows after a revision */
+router.get('/changes', asyncHandler(async (req, res) => {
+  const full = req.query.full === '1' || req.query.full === 'true';
+  const opts = { after: req.query.after, limit: req.query.limit };
+  const pk = await storePk(req);
+  ok(res, full ? await getChangesFull(pk, opts) : await getChanges(pk, opts));
 }));
 
 router.post('/bundle', asyncHandler(async (req, res) => {
@@ -72,20 +86,18 @@ router.get('/settings/kv', asyncHandler(async (req, res) => {
   ok(res, await pullCollection(await storePk(req), 'settings', { since: req.query.since }));
 }));
 
-/** Soft-delete */
+/** Soft-delete (appends sync_changes with operation=delete) */
 router.delete('/:collection/:localId', asyncHandler(async (req, res) => {
   const { collection, localId } = req.params;
-  if (!COLLECTIONS.includes(collection)) throw new AppError(400, 'Unknown collection');
-  const pk = await storePk(req);
-  const deviceId = req.auth.deviceId || null;
-  const { rowCount } = await query(
-    `UPDATE ${collection}
-     SET deleted = TRUE, updated_at = NOW(), version = version + 1, device_id = COALESCE($3, device_id)
-     WHERE store_pk = $1 AND local_id = $2`,
-    [pk, Number(localId), deviceId]
+  ok(
+    res,
+    await softDeleteDoc(
+      await storePk(req),
+      collection,
+      Number(localId),
+      req.auth.deviceId || null,
+    ),
   );
-  if (!rowCount) throw new AppError(404, 'Document not found');
-  ok(res, { deleted: true, id: Number(localId) });
 }));
 
 /** Push one collection (create/update) */
@@ -100,10 +112,15 @@ router.get('/:collection', asyncHandler(async (req, res) => {
   assertCollection(req.params.collection);
   const data = await pullCollection(await storePk(req), req.params.collection, {
     since: req.query.since,
+    afterId: req.query.after_id,
     includeDeleted: req.query.include_deleted !== '0',
     limit: req.query.limit,
   });
-  ok(res, data, { since: req.query.since || null, server_time: new Date().toISOString() });
+  ok(res, data, {
+    since: req.query.since || null,
+    after_id: req.query.after_id || null,
+    server_time: new Date().toISOString(),
+  });
 }));
 
 export default router;

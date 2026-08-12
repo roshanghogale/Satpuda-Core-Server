@@ -23,9 +23,19 @@ CREATE TABLE IF NOT EXISTS stores (
   android_key     TEXT UNIQUE,                   -- SC-XXXXXXXX pairing key
   device_role     TEXT DEFAULT 'pc',
   notes           TEXT,
+  activation_date DATE,                          -- first online activation (YYYY-MM-DD)
+  expiry_enabled  BOOLEAN NOT NULL DEFAULT FALSE,
+  expiry_date     DATE,                          -- access ends on/after this day when enabled
+  apply_expiry_check BOOLEAN NOT NULL DEFAULT TRUE,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Existing DBs created before license columns
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS activation_date DATE;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS expiry_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS expiry_date DATE;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS apply_expiry_check BOOLEAN NOT NULL DEFAULT TRUE;
 
 CREATE INDEX IF NOT EXISTS idx_stores_android_key ON stores(android_key) WHERE android_key IS NOT NULL;
 
@@ -161,6 +171,9 @@ CREATE TABLE IF NOT EXISTS medicines_master (
   content_drug  TEXT,
   med_type      TEXT,
   pack_size     TEXT,
+  schedule      TEXT,
+  hsn_code      TEXT,
+  gst_percent   DOUBLE PRECISION,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_med_master_name ON medicines_master(name);
@@ -650,15 +663,22 @@ CREATE TABLE IF NOT EXISTS medicine_suppliers (
 
 -- Ensure general_products has sync_status (idempotent for older DBs)
 ALTER TABLE general_products ADD COLUMN IF NOT EXISTS sync_status TEXT NOT NULL DEFAULT 'synced';
--- medicines_master store-scoped local ids for sync
+-- medicines_master sync meta + catalog extras (global catalog uses store_pk IS NULL)
 ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS local_id BIGINT;
 ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS version INT NOT NULL DEFAULT 1;
 ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS device_id TEXT;
 ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS deleted BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS sync_status TEXT NOT NULL DEFAULT 'synced';
+ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS schedule TEXT;
+ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS hsn_code TEXT;
+ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS gst_percent DOUBLE PRECISION;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_med_master_store_local
   ON medicines_master (store_pk, local_id) WHERE local_id IS NOT NULL;
+-- One global row per medicine name (case-insensitive)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_med_master_global_name
+  ON medicines_master (LOWER(TRIM(name)))
+  WHERE store_pk IS NULL AND NOT deleted;
 
 -- FY serial allocation lock table (atomic next serial)
 CREATE TABLE IF NOT EXISTS fy_serials (
@@ -688,3 +708,43 @@ CREATE TABLE IF NOT EXISTS audit_log (
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
+
+-- ─── Option B sync: monotonic revision + append-only changelog ────────────────
+-- Watermark APIs remain for backward compatibility during migration.
+
+CREATE TABLE IF NOT EXISTS store_sync_state (
+  store_pk       INT PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+  head_revision  BIGINT NOT NULL DEFAULT 0,
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS sync_changes (
+  id                 BIGSERIAL PRIMARY KEY,
+  store_pk           INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  revision           BIGINT NOT NULL,
+  collection         TEXT NOT NULL,
+  local_id           BIGINT NOT NULL,
+  operation          TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+  entity_version     INT,
+  entity_updated_at  TIMESTAMPTZ,
+  device_id          TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (store_pk, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_sync_changes_pull
+  ON sync_changes (store_pk, revision);
+CREATE INDEX IF NOT EXISTS idx_sync_changes_entity
+  ON sync_changes (store_pk, collection, local_id, revision DESC);
+
+CREATE TABLE IF NOT EXISTS device_sync_state (
+  store_pk            INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  device_id           TEXT NOT NULL,
+  last_ack_revision   BIGINT NOT NULL DEFAULT 0,
+  last_seen_at        TIMESTAMPTZ,
+  PRIMARY KEY (store_pk, device_id)
+);
+
+-- One-time backfill: every store starts at head_revision = 0
+INSERT INTO store_sync_state (store_pk, head_revision)
+SELECT id, 0 FROM stores
+ON CONFLICT (store_pk) DO NOTHING;

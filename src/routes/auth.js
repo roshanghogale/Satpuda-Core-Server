@@ -1,7 +1,15 @@
 import { Router } from 'express';
 import { asyncHandler, ok } from '../utils/http.js';
-import { adminLogin, pairStore, requireAdmin, requireAuth } from '../middleware/auth.js';
+import {
+  adminLogin,
+  pairStore,
+  requireAdmin,
+  requireAuth,
+  requireStoreIdentity,
+} from '../middleware/auth.js';
 import { healthCheck } from '../db/pool.js';
+import { AppError } from '../utils/http.js';
+import { getStoreLicense, licensePayload, updateStoreLicense } from '../services/licenseService.js';
 
 const router = Router();
 
@@ -23,9 +31,10 @@ router.get('/meta', (_req, res) => {
       'sales_returns', 'purchase_returns',
       'general_products', 'stock_disposals', 'pending_orders',
       'racks', 'sections', 'boxes', 'shelves', 'medicine_shelf',
-      'medicine_suppliers', 'medicines_master',
+      'medicine_suppliers',
     ],
     special: ['pharmacy_profile', 'dropdowns', 'shelf_settings', 'settings'],
+    global_master: '/api/master-medicines',
   });
 });
 
@@ -59,7 +68,26 @@ router.post('/auth/pair', asyncHandler(async (req, res) => {
       app_mode: result.store.app_mode,
       android_key: result.store.android_key,
     },
+    license: licensePayload(result.store),
   });
+}));
+
+/** Store license / access status (Online devices; readable even if access blocked) */
+router.get('/auth/license', requireStoreIdentity, asyncHandler(async (req, res) => {
+  if (req.auth.type !== 'store') throw new AppError(403, 'Store token required');
+  const storePk = req.auth.storePk || req.auth.store?.id;
+  ok(res, await getStoreLicense(storePk));
+}));
+
+/** PC Administrator / Online activation updates license on server */
+router.put('/auth/license', requireStoreIdentity, asyncHandler(async (req, res) => {
+  if (req.auth.type !== 'store') throw new AppError(403, 'Store token required');
+  const storePk = req.auth.storePk || req.auth.store?.id;
+  // Devices may update expiry settings + record activation_date.
+  // is_active is admin-panel only (turn off access from server).
+  const body = { ...(req.body || {}) };
+  delete body.is_active;
+  ok(res, await updateStoreLicense(storePk, body));
 }));
 
 router.get('/auth/me', requireAuth(['admin', 'store']), asyncHandler(async (req, res) => {

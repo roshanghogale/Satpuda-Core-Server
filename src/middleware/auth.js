@@ -39,11 +39,13 @@ export async function adminLogin(username, password) {
 /** Pair device with store via android_key (SC-XXXXXXXX) */
 export async function pairStore({ androidKey, storeName, deviceId, deviceType = 'pc', deviceName }) {
   const { rows } = await query(
-    `SELECT * FROM stores WHERE android_key = $1 AND is_active = TRUE`,
+    `SELECT * FROM stores WHERE android_key = $1`,
     [androidKey]
   );
   const store = rows[0];
   if (!store) throw new AppError(404, 'Invalid store key');
+  const { assertStoreAccess } = await import('../services/licenseService.js');
+  await assertStoreAccess(store);
   if (storeName) {
     const a = String(storeName).trim().toLowerCase();
     const b = String(store.store_name).trim().toLowerCase();
@@ -84,10 +86,12 @@ export function requireAuth(roles = ['admin', 'store']) {
         req.auth = { type: 'admin', adminId: Number(payload.sub), username: payload.username };
       } else if (payload.typ === 'store') {
         const { rows } = await query(
-          `SELECT * FROM stores WHERE id = $1 AND is_active = TRUE`,
+          `SELECT * FROM stores WHERE id = $1`,
           [Number(payload.sub)]
         );
-        if (!rows[0]) throw new AppError(401, 'Store not found or inactive');
+        if (!rows[0]) throw new AppError(401, 'Store not found');
+        const { assertStoreAccess, licensePayload } = await import('../services/licenseService.js');
+        await assertStoreAccess(rows[0]);
         req.auth = {
           type: 'store',
           storePk: rows[0].id,
@@ -95,6 +99,7 @@ export function requireAuth(roles = ['admin', 'store']) {
           storeKey: rows[0].store_key,
           deviceId: payload.device_id,
           store: rows[0],
+          license: licensePayload(rows[0]),
         };
         if (payload.device_id) {
           query(
@@ -117,6 +122,43 @@ export function requireAdmin(req, _res, next) {
 
 export function requireStore(req, _res, next) {
   return requireAuth(['store', 'admin'])(req, _res, next);
+}
+
+/** Store JWT without access/expiry gate — used for license status reads. */
+export function requireStoreIdentity(req, _res, next) {
+  return (async () => {
+    try {
+      const header = req.headers.authorization || '';
+      const raw = header.startsWith('Bearer ') ? header.slice(7) : null;
+      if (!raw) throw new AppError(401, 'Missing authorization token');
+      let payload;
+      try {
+        payload = jwt.verify(raw, config.jwtSecret);
+      } catch {
+        throw new AppError(401, 'Invalid or expired token');
+      }
+      if (payload.typ === 'admin') {
+        req.auth = { type: 'admin', adminId: Number(payload.sub), username: payload.username };
+        return next();
+      }
+      if (payload.typ !== 'store') throw new AppError(403, 'Forbidden');
+      const { rows } = await query(`SELECT * FROM stores WHERE id = $1`, [Number(payload.sub)]);
+      if (!rows[0]) throw new AppError(401, 'Store not found');
+      const { licensePayload } = await import('../services/licenseService.js');
+      req.auth = {
+        type: 'store',
+        storePk: rows[0].id,
+        storeId: rows[0].store_id,
+        storeKey: rows[0].store_key,
+        deviceId: payload.device_id,
+        store: rows[0],
+        license: licensePayload(rows[0]),
+      };
+      next();
+    } catch (err) {
+      next(err);
+    }
+  })();
 }
 
 /** Admin can pass ?store_id= or header; store token is scoped automatically */

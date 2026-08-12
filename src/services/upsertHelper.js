@@ -5,29 +5,43 @@
 import { AppError } from '../utils/http.js';
 import { parseTs, toBool } from '../utils/fy.js';
 
+/**
+ * Conflict / no-op resolution:
+ * - missing row → accept
+ * - soft-delete incoming → accept
+ * - higher version → accept
+ * - lower version → skip
+ * - same version + newer updated_at → accept
+ * - same version + same/older updated_at → skip (idempotent re-push)
+ *
+ * Re-pushing the same bulk Sync/Push payload must not rewrite Postgres rows.
+ */
 export function shouldAcceptIncoming(existing, incoming) {
   if (!existing) return 'accept';
   if (incoming.deleted && !existing.deleted) return 'accept';
+
   const ev = Number(existing.version || 1);
   const iv = Number(incoming.version || 1);
   if (iv > ev) return 'accept';
   if (iv < ev) return 'skip';
+
   const et = parseTs(existing.updated_at)?.getTime() || 0;
   const it = parseTs(incoming.updated_at)?.getTime() || 0;
+  // Require a strictly newer timestamp for same-version updates.
+  // Equal / missing / older → skip so repeated Sync to Server is a no-op.
   if (it > et) return 'accept';
-  if (it < et) return 'skip';
-  const ed = existing.device_id || '';
-  const id = incoming.device_id || '';
-  if (id && !ed) return 'accept';
-  if (ed && !id) return 'skip';
-  if (id && ed && id > ed) return 'accept';
-  if (id && ed && id < ed) return 'skip';
   return 'skip';
 }
 
 export function syncMeta(doc) {
+  // Do NOT default to Date.now() — that makes every re-push look "newer".
+  const updated =
+    parseTs(doc.updated_at) ||
+    parseTs(doc.synced_at) ||
+    parseTs(doc.last_updated) ||
+    null;
   return {
-    updated_at: parseTs(doc.updated_at) || parseTs(doc.synced_at) || new Date(),
+    updated_at: updated,
     version: Number(doc.version || 1),
     device_id: doc.device_id || null,
     deleted: toBool(doc.deleted),
@@ -35,10 +49,43 @@ export function syncMeta(doc) {
   };
 }
 
+/** Timestamp used when actually writing a row. */
+export function writeTimestamp(meta, existing) {
+  return (
+    meta?.updated_at ||
+    parseTs(existing?.updated_at) ||
+    new Date()
+  );
+}
+
 export function localIdOf(doc) {
   const id = doc.id ?? doc.local_id;
   if (id === undefined || id === null || id === '') throw new AppError(400, 'Document id required');
   return Number(id);
+}
+
+function stableJson(value) {
+  try {
+    return JSON.stringify(value ?? null);
+  } catch {
+    return String(value);
+  }
+}
+
+/** True when business fields are unchanged (special singleton docs). */
+export function sameScalarFields(existing, incoming, fields) {
+  if (!existing) return false;
+  for (const f of fields) {
+    const a = existing[f];
+    const b = incoming[f];
+    if (a == null && b == null) continue;
+    if (typeof a === 'object' || typeof b === 'object') {
+      if (stableJson(a) !== stableJson(b)) return false;
+    } else if (String(a ?? '') !== String(b ?? '')) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -63,6 +110,7 @@ export async function upsertSimple(client, {
     return { id: localId, status: 'skipped' };
   }
 
+  const writeAt = writeTimestamp(meta, existing.rows[0]);
   const colNames = columns.map((c) => (typeof c === 'string' ? c : c.key));
   const values = columns.map((c) => {
     const key = typeof c === 'string' ? c : c.key;
@@ -74,7 +122,7 @@ export async function upsertSimple(client, {
   });
 
   const allCols = ['store_pk', 'local_id', ...colNames, 'updated_at', 'version', 'device_id', 'deleted', 'sync_status'];
-  const allVals = [storePk, localId, ...values, meta.updated_at, meta.version, meta.device_id, meta.deleted, meta.sync_status];
+  const allVals = [storePk, localId, ...values, writeAt, meta.version, meta.device_id, meta.deleted, meta.sync_status];
   const placeholders = allVals.map((_, i) => `$${i + 1}`).join(',');
   const updates = colNames
     .map((c) => `${c}=EXCLUDED.${c}`)
@@ -92,5 +140,22 @@ export async function upsertSimple(client, {
      ON CONFLICT (store_pk, local_id) DO UPDATE SET ${updates}`,
     allVals
   );
-  return { id: localId, status: 'upserted' };
+  // 'upserted' retained for API compatibility; changelog treats it as applied.
+  return { id: localId, status: 'upserted', applied: true };
+}
+
+/** True when a write was accepted (changelog should append). */
+export function isAcceptedWrite(status) {
+  return (
+    status === 'applied' ||
+    status === 'upserted' ||
+    status === 'stock_patched' ||
+    status === 'soft_deleted'
+  );
+}
+
+/** Changelog operation for an accepted write status. */
+export function changelogOperation(status) {
+  if (status === 'soft_deleted') return 'delete';
+  return 'upsert';
 }

@@ -274,3 +274,49 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border-radius: 8px;
   letter-spacing: 0.06em;
 }
+
+.settings-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px 14px;
+}
+.settings-field {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.settings-field-label {
+  font-size: 0.75rem;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.settings-field-value {
+  font-size: 0.95rem;
+  word-break: break-word;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.chip {
+  background: rgba(45, 212, 168, 0.12);
+  border: 1px solid rgba(45, 212, 168, 0.28);
+  color: var(--text);
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+}
+.settings-json {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  font-size: 0.78rem;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
