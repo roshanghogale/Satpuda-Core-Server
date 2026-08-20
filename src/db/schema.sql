@@ -319,7 +319,9 @@ CREATE TABLE IF NOT EXISTS purchase_items (
   discount_pct    DOUBLE PRECISION NOT NULL DEFAULT 0,
   taxable         DOUBLE PRECISION NOT NULL DEFAULT 0,
   gst_amt         DOUBLE PRECISION NOT NULL DEFAULT 0,
-  item_amount     DOUBLE PRECISION NOT NULL DEFAULT 0
+  item_amount     DOUBLE PRECISION NOT NULL DEFAULT 0,
+  unit            TEXT,
+  tablets_per_stripe INT
 );
 CREATE INDEX IF NOT EXISTS idx_purchase_items_purchase ON purchase_items(purchase_id);
 
@@ -748,3 +750,76 @@ CREATE TABLE IF NOT EXISTS device_sync_state (
 INSERT INTO store_sync_state (store_pk, head_revision)
 SELECT id, 0 FROM stores
 ON CONFLICT (store_pk) DO NOTHING;
+
+-- ─── Option B Phase B4 ───────────────────────────────────────────────────────
+-- B4.1: stable client-generated UUIDs (idempotent create across devices)
+ALTER TABLE medicines ADD COLUMN IF NOT EXISTS client_uuid TEXT;
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS client_uuid TEXT;
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS client_uuid TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_medicines_client_uuid
+  ON medicines (store_pk, client_uuid) WHERE client_uuid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_sales_client_uuid
+  ON sales (store_pk, client_uuid) WHERE client_uuid IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_purchases_client_uuid
+  ON purchases (store_pk, client_uuid) WHERE client_uuid IS NOT NULL;
+
+-- B4.2: append-only stock delta log (apply once per op_uuid)
+CREATE TABLE IF NOT EXISTS stock_operations (
+  id              BIGSERIAL PRIMARY KEY,
+  store_pk        INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  local_id        BIGINT NOT NULL,
+  op_uuid         TEXT NOT NULL,
+  medicine_id     BIGINT NOT NULL,              -- medicine local_id
+  op              TEXT NOT NULL,                -- sale|purchase|return|adjust|disposal|set
+  qty_delta       INT NOT NULL,
+  ref_collection  TEXT,
+  ref_id          BIGINT,
+  revision        BIGINT,
+  device_id       TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (store_pk, op_uuid),
+  UNIQUE (store_pk, local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_stock_ops_medicine
+  ON stock_operations (store_pk, medicine_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_stock_ops_revision
+  ON stock_operations (store_pk, revision);
+
+CREATE INDEX IF NOT EXISTS idx_cust_pay_customer
+  ON customer_payments (store_pk, customer_id) WHERE NOT deleted;
+CREATE INDEX IF NOT EXISTS idx_sales_ret_customer
+  ON sales_returns (store_pk, customer_id) WHERE NOT deleted;
+CREATE INDEX IF NOT EXISTS idx_supp_pay_supplier
+  ON supplier_payments (store_pk, supplier_id) WHERE NOT deleted;
+CREATE INDEX IF NOT EXISTS idx_purch_ret_supplier
+  ON purchase_returns (store_pk, supplier_id) WHERE NOT deleted;
+CREATE INDEX IF NOT EXISTS idx_purch_ret_purchase
+  ON purchase_returns (store_pk, purchase_id) WHERE NOT deleted;
+
+-- Purchase line pack (strip size) so edit stock uses qty × pack, not qty as tablets.
+ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS unit TEXT;
+ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS tablets_per_stripe INT;
+
+UPDATE purchase_items pi
+SET
+  unit = COALESCE(NULLIF(btrim(pi.unit), ''), NULLIF(btrim(m.unit), '')),
+  tablets_per_stripe = COALESCE(
+    pi.tablets_per_stripe,
+    CASE
+      WHEN (regexp_match(COALESCE(m.unit, ''), '1\s*[Xx×*]\s*(\d+)'))[1] IS NOT NULL
+        THEN (regexp_match(m.unit, '1\s*[Xx×*]\s*(\d+)'))[1]::int
+      WHEN COALESCE(m.unit, '') ~ '^[0-9]+([.][0-9]+)?'
+        THEN floor(substring(m.unit from '^[0-9]+')::numeric)::int
+      WHEN COALESCE(m.unit, '') ~ '[0-9]+'
+        THEN (regexp_match(m.unit, '[0-9]+'))[1]::int
+      ELSE NULL
+    END
+  )
+FROM medicines m
+WHERE m.store_pk = pi.store_pk
+  AND m.local_id = pi.medicine_id
+  AND (
+    pi.unit IS NULL OR btrim(pi.unit) = ''
+    OR pi.tablets_per_stripe IS NULL
+  );

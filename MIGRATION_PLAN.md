@@ -32,7 +32,8 @@ Replace Firebase SDK calls with REST:
 | `store_keys/{SC-…}` validate | `POST /api/auth/pair` |
 | `stores/{id}/{collection}/{doc}` set | `POST /api/sync/{collection}` |
 | Batch sale/purchase | `POST /api/sync/bundle` |
-| Listeners / pull since watermark | `GET /api/sync/{collection}?since=` |
+| Listeners / pull since watermark | `GET /api/sync/{collection}?since=` (legacy rollback) |
+| Live revision sync (Option B) | `GET /api/sync/status`, `GET /api/sync/changes/full`, WS `/ws/sync` (`sync_hint`) |
 | Soft delete | `DELETE /api/sync/{collection}/{id}` |
 | Settings profile/dropdowns | `PUT/GET /api/sync/settings/*` |
 | FY bill allocate (optional) | `POST /api/sync/fy/allocate` |
@@ -99,6 +100,15 @@ Config: `API_BASE=https://api.satpudacore.online`
 - Soft-delete + conflict merge  
 
 ---
+
+## Option B live sync (B0–B4)
+
+- Server: `store_sync_state.head_revision` + append-only `sync_changes`; WS `sync_hint` only.
+- Clients (Mac2 / Android): SyncEngine pulls deltas; UI reads SQLite. Default `USE_REVISION_SYNC=true`.
+- Manual **Pull from Server** = disaster-recovery full replace only (not day-to-day).
+- Watermark poller kept behind `USE_REVISION_SYNC=false` rollback.
+- B4: `client_uuid`, `stock_operations` delta log, admin Sync tab + `POST /api/sync/ack`.
+- See `mac2/docs/OPTION_B_SYNC.md`.
 
 ## Risk notes
 

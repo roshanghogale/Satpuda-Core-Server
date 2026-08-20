@@ -23,26 +23,92 @@ import {
   sameScalarFields,
   isAcceptedWrite,
   changelogOperation,
+  keepFilledText,
 } from './upsertHelper.js';
 import {
   ensureStoreSyncState,
   recordAcceptedChange,
+  recordAcceptedChanges,
   newSyncHint,
 } from './syncRevision.js';
 import { broadcastSyncHint } from '../ws/syncHub.js';
+import {
+  resolveLocalIdByClientUuid,
+  persistClientUuid,
+  normalizeClientUuid,
+} from './clientUuid.js';
+import {
+  applyStockOperation,
+  applyEmbeddedStockOps,
+  recordAbsoluteStockPatch,
+  fetchStockOpsByLocalIds,
+} from './stockOperations.js';
+import {
+  cascadeCustomerAfterLedgerChange,
+  cascadeSupplierAfterLedgerChange,
+} from './partyDueCascade.js';
 
 export { shouldAcceptIncoming } from './upsertHelper.js';
 
 function emitSyncHint(hint) {
   if (!hint?.revisions?.length) return;
+  const changes = Array.isArray(hint.changes) ? hint.changes : [];
   broadcastSyncHint(hint.storePk, {
     head_revision: Math.max(...hint.revisions),
     source_device_id: hint.sourceDeviceId || null,
+    changes,
+    full_refresh: false,
   });
 }
 
-async function noteAcceptedChange(client, hint, storePk, collection, doc, status, overrides = {}) {
-  if (!isAcceptedWrite(status)) return;
+function parseTabletsPerStripe(unitStr) {
+  const s = String(unitStr || '').trim();
+  if (!s) return 0;
+  const oneBy = s.match(/^1\s*[Xx×*]\s*(\d+)$/);
+  if (oneBy) return Math.max(1, parseInt(oneBy[1], 10) || 0);
+  const asNum = Number(s);
+  if (Number.isFinite(asNum) && asNum > 0) return Math.floor(asNum);
+  const digits = s.match(/\d+/);
+  return digits ? Math.max(1, parseInt(digits[0], 10) || 0) : 0;
+}
+
+function purchaseItemPack(it, medUnit) {
+  let unit = String(
+    it?.unit || it?.quantity_value || it?.pack || medUnit || '',
+  ).trim();
+  let tps = Number(it?.tablets_per_stripe ?? it?.tablets_per_strip ?? 0);
+  if (!Number.isFinite(tps) || tps <= 0) tps = parseTabletsPerStripe(unit);
+  if (!unit && tps > 0) unit = String(tps);
+  return {
+    unit: unit || null,
+    tablets_per_stripe: tps > 0 ? Math.round(tps) : null,
+  };
+}
+
+async function loadMedicineUnits(db, storePk, items) {
+  const medUnit = new Map();
+  const ids = [...new Set(
+    (items || [])
+      .filter((it) => {
+        if (!it?.medicine_id) return false;
+        const pack = purchaseItemPack(it);
+        return !pack.unit && !pack.tablets_per_stripe;
+      })
+      .map((it) => Number(it.medicine_id))
+      .filter((n) => n > 0)
+  )];
+  if (!ids.length || !storePk) return medUnit;
+  const res = await db.query(
+    `SELECT local_id, unit FROM medicines
+     WHERE store_pk=$1 AND local_id = ANY($2::bigint[])`,
+    [storePk, ids]
+  );
+  for (const m of res.rows) medUnit.set(Number(m.local_id), m.unit);
+  return medUnit;
+}
+
+function acceptedChangeEntry(storePk, collection, doc, status, overrides = {}) {
+  if (!isAcceptedWrite(status)) return null;
   const meta = doc && typeof doc === 'object' ? syncMeta(doc) : {};
   const localId =
     overrides.localId != null
@@ -50,7 +116,7 @@ async function noteAcceptedChange(client, hint, storePk, collection, doc, status
       : doc && typeof doc === 'object'
         ? localIdOf(doc)
         : Number(doc);
-  await recordAcceptedChange(client, hint, {
+  return {
     storePk,
     collection,
     localId,
@@ -67,7 +133,19 @@ async function noteAcceptedChange(client, hint, storePk, collection, doc, status
       overrides.deviceId != null
         ? overrides.deviceId
         : meta.device_id ?? null,
-  });
+  };
+}
+
+async function noteAcceptedChange(client, hint, storePk, collection, doc, status, overrides = {}) {
+  const entry = acceptedChangeEntry(storePk, collection, doc, status, overrides);
+  if (!entry) return;
+  await recordAcceptedChange(client, hint, entry);
+}
+
+async function noteAcceptedChangeMany(client, hint, entries) {
+  const list = (entries || []).filter(Boolean);
+  if (!list.length) return;
+  await recordAcceptedChanges(client, hint, list);
 }
 
 /** Multi-row INSERT — cuts hundreds of round-trips for nested line items. */
@@ -88,11 +166,16 @@ async function multiInsert(client, table, columns, rows, { batchSize = 200 } = {
 }
 
 /** Multi-row UPSERT for flat (store_pk, local_id) tables. */
-async function multiUpsert(client, table, columns, updateCols, rows, { batchSize = 150 } = {}) {
+async function multiUpsert(client, table, columns, updateCols, rows, { batchSize = 150, keepFilledCols = [] } = {}) {
   if (!rows?.length) return;
   const colSql = columns.join(', ');
   const width = columns.length;
-  const updates = updateCols.map((c) => `${c}=EXCLUDED.${c}`).join(', ');
+  const keep = new Set(keepFilledCols);
+  const updates = updateCols.map((c) => (
+    keep.has(c)
+      ? `${c}=COALESCE(NULLIF(TRIM(EXCLUDED.${c}), ''), ${table}.${c})`
+      : `${c}=EXCLUDED.${c}`
+  )).join(', ');
   for (let i = 0; i < rows.length; i += batchSize) {
     const slice = rows.slice(i, i + batchSize);
     const params = [];
@@ -111,8 +194,9 @@ async function multiUpsert(client, table, columns, updateCols, rows, { batchSize
 
 async function prefetchExisting(client, table, storePk, localIds) {
   if (!localIds.length) return new Map();
+  const extra = table === 'customers' ? ', phone, address' : '';
   const res = await client.query(
-    `SELECT local_id, id, version, updated_at, device_id, deleted
+    `SELECT local_id, id, version, updated_at, device_id, deleted${extra}
      FROM ${table}
      WHERE store_pk=$1 AND local_id = ANY($2::bigint[])`,
     [storePk, localIds]
@@ -120,11 +204,11 @@ async function prefetchExisting(client, table, storePk, localIds) {
   return new Map(res.rows.map((r) => [Number(r.local_id), r]));
 }
 
+// Medicines intentionally NOT flat-bulk: B4 stock_ops + client_uuid need upsertMedicine.
 const FLAT_BULK = new Set([
   'customers',
   'suppliers',
   'doctors',
-  'medicines',
   'customer_payments',
   'supplier_payments',
 ]);
@@ -150,7 +234,9 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
       rows.push([
         storePk, localId,
         String(doc.name || '').toUpperCase(),
-        doc.phone || null, doc.address || null, doc.document_name || null,
+        keepFilledText(doc.phone, existing?.phone),
+        keepFilledText(doc.address, existing?.address),
+        doc.document_name || null,
         Number(doc.total_due || 0), Number(doc.total_credit || 0),
         parseTs(doc.created_at), parseTs(doc.last_updated),
         writeAt, meta.version, meta.device_id, meta.deleted, meta.sync_status,
@@ -207,7 +293,7 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
     ], [
       'name', 'phone', 'address', 'document_name', 'total_due', 'total_credit', 'last_updated',
       'updated_at', 'version', 'device_id', 'deleted', 'sync_status',
-    ], rows);
+    ], rows, { keepFilledCols: ['phone', 'address'] });
   } else if (collection === 'suppliers') {
     await multiUpsert(client, 'suppliers', [
       'store_pk', 'local_id', 'name', 'address', 'phone', 'gstin', 'dl_numbers',
@@ -259,9 +345,11 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
     ], rows);
   }
 
-  for (const doc of acceptedDocs) {
-    await noteAcceptedChange(client, hint, storePk, collection, doc, 'upserted');
-  }
+  await noteAcceptedChangeMany(
+    client,
+    hint,
+    acceptedDocs.map((doc) => acceptedChangeEntry(storePk, collection, doc, 'upserted')),
+  );
 
   const upserted = results.filter((r) => r.status === 'upserted').length;
   const skipped = results.length - upserted;
@@ -282,6 +370,7 @@ export const COLLECTIONS = [
   'purchase_returns',
   'general_products',
   'stock_disposals',
+  'stock_operations',
   'pending_orders',
   'racks',
   'sections',
@@ -305,12 +394,16 @@ async function upsertCustomer(client, storePk, doc) {
   const localId = localIdOf(doc);
   const meta = syncMeta(doc);
   const existing = await client.query(
-    `SELECT version, updated_at, device_id, deleted FROM customers WHERE store_pk=$1 AND local_id=$2`,
+    `SELECT version, updated_at, device_id, deleted, phone, address
+     FROM customers WHERE store_pk=$1 AND local_id=$2`,
     [storePk, localId]
   );
   if (shouldAcceptIncoming(existing.rows[0], { ...meta }) === 'skip') {
     return { id: localId, status: 'skipped' };
   }
+  const prev = existing.rows[0] || null;
+  const phone = keepFilledText(doc.phone, prev?.phone);
+  const address = keepFilledText(doc.address, prev?.address);
   await client.query(
     `INSERT INTO customers (
        store_pk, local_id, name, phone, address, document_name,
@@ -318,7 +411,9 @@ async function upsertCustomer(client, storePk, doc) {
        updated_at, version, device_id, deleted, sync_status
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
-       name=EXCLUDED.name, phone=EXCLUDED.phone, address=EXCLUDED.address,
+       name=EXCLUDED.name,
+       phone=COALESCE(NULLIF(TRIM(EXCLUDED.phone), ''), customers.phone),
+       address=COALESCE(NULLIF(TRIM(EXCLUDED.address), ''), customers.address),
        document_name=EXCLUDED.document_name, total_due=EXCLUDED.total_due,
        total_credit=EXCLUDED.total_credit, last_updated=EXCLUDED.last_updated,
        updated_at=EXCLUDED.updated_at, version=EXCLUDED.version,
@@ -326,10 +421,10 @@ async function upsertCustomer(client, storePk, doc) {
     [
       storePk, localId,
       String(doc.name || '').toUpperCase(),
-      doc.phone || null, doc.address || null, doc.document_name || null,
+      phone, address, doc.document_name || null,
       Number(doc.total_due || 0), Number(doc.total_credit || 0),
       parseTs(doc.created_at), parseTs(doc.last_updated),
-      writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+      writeTimestamp(meta, prev), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
   return { id: localId, status: 'upserted' };
@@ -395,14 +490,64 @@ async function upsertDoctor(client, storePk, doc) {
   return { id: localId, status: 'upserted' };
 }
 
-async function upsertMedicine(client, storePk, doc) {
-  const localId = localIdOf(doc);
+async function upsertMedicine(client, storePk, doc, hint = null) {
+  const { localId, clientUuid } = await resolveLocalIdByClientUuid(
+    client, 'medicines', storePk, doc,
+  );
+  if (!Number.isFinite(localId) || localId <= 0) {
+    throw new AppError(400, 'Document id required');
+  }
   const meta = syncMeta(doc);
+  const hasStockOps = Array.isArray(doc.stock_ops || doc.stockOps)
+    && (doc.stock_ops || doc.stockOps).length > 0;
   const existing = await client.query(
-    `SELECT version, updated_at, device_id, deleted, stock_qty FROM medicines WHERE store_pk=$1 AND local_id=$2`,
+    `SELECT version, updated_at, device_id, deleted, stock_qty, client_uuid
+     FROM medicines WHERE store_pk=$1 AND local_id=$2`,
     [storePk, localId]
   );
   const decision = shouldAcceptIncoming(existing.rows[0], { ...meta });
+  // B4.2: prefer stock_ops deltas over absolute LWW when provided.
+  if (hasStockOps) {
+    if (decision !== 'skip') {
+      const keepQty = existing.rows[0]
+        ? Number(existing.rows[0].stock_qty || 0)
+        : Number(doc.stock_qty || 0);
+      await client.query(
+        `INSERT INTO medicines (
+           store_pk, local_id, name, type, stock_qty, unit, gst_percent, mrp, rate,
+           manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
+           is_hidden, synced_at, created_at,
+           updated_at, version, device_id, deleted, sync_status, client_uuid
+         ) VALUES (
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+         )
+         ON CONFLICT (store_pk, local_id) DO UPDATE SET
+           name=EXCLUDED.name, type=EXCLUDED.type, unit=EXCLUDED.unit,
+           gst_percent=EXCLUDED.gst_percent, mrp=EXCLUDED.mrp, rate=EXCLUDED.rate,
+           manufacturer=EXCLUDED.manufacturer, batch_no=EXCLUDED.batch_no, expiry_date=EXCLUDED.expiry_date,
+           hsn_code=EXCLUDED.hsn_code, schedule=EXCLUDED.schedule, location=EXCLUDED.location,
+           content_drug=EXCLUDED.content_drug, is_hidden=EXCLUDED.is_hidden, synced_at=EXCLUDED.synced_at,
+           updated_at=EXCLUDED.updated_at, version=EXCLUDED.version, device_id=EXCLUDED.device_id,
+           deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status,
+           client_uuid=COALESCE(medicines.client_uuid, EXCLUDED.client_uuid)`,
+        [
+          storePk, localId, String(doc.name || '').toUpperCase(), doc.type || null,
+          keepQty, doc.unit || null,
+          doc.gst_percent ?? null, doc.mrp ?? null, doc.rate ?? null,
+          doc.manufacturer || null, doc.batch_no || null,
+          parseDateOnly(doc.expiry_date), doc.hsn_code || null, doc.schedule || null,
+          doc.location || null, doc.content_drug || null,
+          toBool(doc.is_hidden), parseTs(doc.synced_at), parseTs(doc.created_at),
+          writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+          clientUuid,
+        ]
+      );
+    }
+    const applied = await applyEmbeddedStockOps(client, storePk, { ...doc, id: localId }, hint);
+    await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
+    return { id: localId, status: applied || decision !== 'skip' ? 'upserted' : 'skipped' };
+  }
+
   // When LWW skips (stale updated_at) but stock_qty changed — e.g. Android sale
   // decreased stock without bumping sync meta — still apply the stock figure.
   if (decision === 'skip') {
@@ -418,8 +563,17 @@ async function upsertMedicine(client, storePk, doc) {
          WHERE store_pk=$1 AND local_id=$2`,
         [storePk, localId, nextQty, meta.device_id || null]
       );
+      await recordAbsoluteStockPatch(client, storePk, {
+        medicineId: localId,
+        prevQty,
+        nextQty,
+        deviceId: meta.device_id,
+        hint,
+      });
+      await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
       return { id: localId, status: 'stock_patched' };
     }
+    await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
     return { id: localId, status: 'skipped' };
   }
 
@@ -428,9 +582,9 @@ async function upsertMedicine(client, storePk, doc) {
        store_pk, local_id, name, type, stock_qty, unit, gst_percent, mrp, rate,
        manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
        is_hidden, synced_at, created_at,
-       updated_at, version, device_id, deleted, sync_status
+       updated_at, version, device_id, deleted, sync_status, client_uuid
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
      )
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
        name=EXCLUDED.name, type=EXCLUDED.type, stock_qty=EXCLUDED.stock_qty, unit=EXCLUDED.unit,
@@ -439,7 +593,8 @@ async function upsertMedicine(client, storePk, doc) {
        hsn_code=EXCLUDED.hsn_code, schedule=EXCLUDED.schedule, location=EXCLUDED.location,
        content_drug=EXCLUDED.content_drug, is_hidden=EXCLUDED.is_hidden, synced_at=EXCLUDED.synced_at,
        updated_at=EXCLUDED.updated_at, version=EXCLUDED.version, device_id=EXCLUDED.device_id,
-       deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status`,
+       deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status,
+       client_uuid=COALESCE(medicines.client_uuid, EXCLUDED.client_uuid)`,
     [
       storePk, localId, String(doc.name || '').toUpperCase(), doc.type || null,
       Number(doc.stock_qty || 0), doc.unit || null,
@@ -449,21 +604,41 @@ async function upsertMedicine(client, storePk, doc) {
       doc.location || null, doc.content_drug || null,
       toBool(doc.is_hidden), parseTs(doc.synced_at), parseTs(doc.created_at),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+      clientUuid,
     ]
   );
   return { id: localId, status: 'upserted' };
 }
 
-async function upsertSale(client, storePk, doc) {
-  const localId = localIdOf(doc);
+async function upsertSale(client, storePk, doc, hint = null) {
+  const { localId, clientUuid } = await resolveLocalIdByClientUuid(
+    client, 'sales', storePk, doc,
+  );
+  if (!Number.isFinite(localId) || localId <= 0) {
+    throw new AppError(400, 'Document id required');
+  }
   const meta = syncMeta(doc);
   const existing = await client.query(
-    `SELECT id, version, updated_at, device_id, deleted FROM sales WHERE store_pk=$1 AND local_id=$2`,
+    `SELECT id, version, updated_at, device_id, deleted,
+            amount_paid, cash_paid, online_paid, previous_due, previous_credit,
+            due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
+            total_amount, discount, discount_pct, rounding
+     FROM sales WHERE store_pk=$1 AND local_id=$2`,
     [storePk, localId]
   );
   if (shouldAcceptIncoming(existing.rows[0], { ...meta }) === 'skip') {
+    await persistClientUuid(client, 'sales', storePk, localId, clientUuid);
     return { id: localId, status: 'skipped' };
   }
+
+  const prev = existing.rows[0] || null;
+  const money = (key, fallback = 0) => {
+    if (Object.prototype.hasOwnProperty.call(doc, key) && doc[key] !== null && doc[key] !== undefined && doc[key] !== '') {
+      return Number(doc[key]);
+    }
+    if (prev && prev[key] != null) return Number(prev[key]);
+    return fallback;
+  };
 
   const billNo = doc.bill_no || encodeSalesBillNo(doc.fy_serial || localId, doc.fy_start_year || fyStartYearForDate(doc.bill_date));
   const fyStart = doc.fy_start_year ?? fyStartYearForDate(doc.bill_date);
@@ -475,10 +650,10 @@ async function upsertSale(client, storePk, doc) {
        due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
        doctor_name, is_autosave, fy_start_year, fy_serial,
        customer_name, customer_phone, customer_address, item_count, created_at,
-       updated_at, version, device_id, deleted, sync_status
+       updated_at, version, device_id, deleted, sync_status, client_uuid
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-       $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34
+       $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35
      )
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
        bill_no=EXCLUDED.bill_no, customer_id=EXCLUDED.customer_id, bill_date=EXCLUDED.bill_date,
@@ -492,39 +667,49 @@ async function upsertSale(client, storePk, doc) {
        customer_name=EXCLUDED.customer_name, customer_phone=EXCLUDED.customer_phone,
        customer_address=EXCLUDED.customer_address, item_count=EXCLUDED.item_count,
        updated_at=EXCLUDED.updated_at, version=EXCLUDED.version, device_id=EXCLUDED.device_id,
-       deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status
+       deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status,
+       client_uuid=COALESCE(sales.client_uuid, EXCLUDED.client_uuid)
      RETURNING id`,
     [
       storePk, localId, billNo, doc.customer_id ?? null, doc.bill_date,
-      Number(doc.total_amount || 0), Number(doc.discount || 0), Number(doc.discount_pct || 0),
-      Number(doc.rounding || 0), Number(doc.amount_paid || 0), Number(doc.cash_paid || 0),
-      Number(doc.online_paid || 0), Number(doc.previous_due || 0), Number(doc.previous_credit || 0),
-      Number(doc.due_amount || 0), Number(doc.credit_amount || 0), Number(doc.total_due || 0),
-      Number(doc.paid_due || 0), toBool(doc.bill_cleared), toBool(doc.account_cleared),
+      money('total_amount'), money('discount'), money('discount_pct'),
+      money('rounding'), money('amount_paid'), money('cash_paid'),
+      money('online_paid'), money('previous_due'), money('previous_credit'),
+      money('due_amount'), money('credit_amount'), money('total_due'),
+      money('paid_due'),
+      Object.prototype.hasOwnProperty.call(doc, 'bill_cleared')
+        ? toBool(doc.bill_cleared)
+        : toBool(prev?.bill_cleared),
+      Object.prototype.hasOwnProperty.call(doc, 'account_cleared')
+        ? toBool(doc.account_cleared)
+        : toBool(prev?.account_cleared),
       doc.doctor_name || null, toBool(doc.is_autosave), fyStart, doc.fy_serial ?? null,
       doc.customer_name || null, doc.customer_phone || null, doc.customer_address || null,
       Number(doc.item_count || (doc.items?.length || 0)), parseTs(doc.created_at),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+      clientUuid,
     ]
   );
   const salePk = result.rows[0].id;
-  await client.query(`DELETE FROM sales_items WHERE sale_id = $1`, [salePk]);
-  const items = Array.isArray(doc.items) ? doc.items : [];
-  await multiInsert(
-    client,
-    'sales_items',
-    [
-      'store_pk', 'sale_id', 'medicine_id', 'name', 'type', 'batch_no', 'expiry_date', 'hsn_code',
-      'schedule', 'manufacturer', 'qty', 'rate', 'gst_percent', 'amount', 'item_discount', 'cost_price',
-    ],
-    items.map((it) => [
-      storePk, salePk, it.medicine_id ?? null, it.name || null, it.type || null,
-      it.batch_no || null, it.expiry_date || null, it.hsn_code || null,
-      it.schedule || null, it.manufacturer || null,
-      Number(it.qty || 0), Number(it.rate || 0), it.gst_percent ?? null,
-      Number(it.amount || 0), Number(it.item_discount || 0), Number(it.cost_price || 0),
-    ])
-  );
+  if (Array.isArray(doc.items)) {
+    await client.query(`DELETE FROM sales_items WHERE sale_id = $1`, [salePk]);
+    const items = doc.items;
+    await multiInsert(
+      client,
+      'sales_items',
+      [
+        'store_pk', 'sale_id', 'medicine_id', 'name', 'type', 'batch_no', 'expiry_date', 'hsn_code',
+        'schedule', 'manufacturer', 'qty', 'rate', 'gst_percent', 'amount', 'item_discount', 'cost_price',
+      ],
+      items.map((it) => [
+        storePk, salePk, it.medicine_id ?? null, it.name || null, it.type || null,
+        it.batch_no || null, it.expiry_date || null, it.hsn_code || null,
+        it.schedule || null, it.manufacturer || null,
+        Number(it.qty || 0), Number(it.rate || 0), it.gst_percent ?? null,
+        Number(it.amount || 0), Number(it.item_discount || 0), Number(it.cost_price || 0),
+      ])
+    );
+  }
   // Keep FY serial table in sync for server-side allocation
   if (fyStart && doc.fy_serial && !toBool(doc.is_autosave)) {
     await client.query(
@@ -535,102 +720,203 @@ async function upsertSale(client, storePk, doc) {
       [storePk, fyStart, Number(doc.fy_serial)]
     );
   }
+  await persistClientUuid(client, 'sales', storePk, localId, clientUuid);
+  const customerId = Number(doc.customer_id);
+  if (customerId > 0 && !toBool(doc.is_autosave)) {
+    try {
+      await cascadeCustomerAfterLedgerChange(client, storePk, customerId, hint);
+    } catch (e) {
+      console.warn('[cascade] customer after sale:', e.message);
+    }
+  }
   return { id: localId, status: 'upserted', bill_no: billNo, display_bill_no: displaySalesBillNo(billNo), fy_label: fyLabel(fyStart) };
 }
 
-async function upsertPurchase(client, storePk, doc) {
-  const localId = localIdOf(doc);
-  const meta = syncMeta(doc);
-  const existing = await client.query(
-    `SELECT id, version, updated_at, device_id, deleted FROM purchases WHERE store_pk=$1 AND local_id=$2`,
-    [storePk, localId]
+async function upsertPurchase(client, storePk, doc, hint = null) {
+  const requestedId = Number(doc?.id ?? doc?.local_id ?? 0);
+  let { localId, clientUuid } = await resolveLocalIdByClientUuid(
+    client, 'purchases', storePk, doc,
   );
+  if (!Number.isFinite(localId) || localId <= 0) {
+    throw new AppError(400, 'Document id required');
+  }
+
+  const loadPurchase = (id) => client.query(
+    `SELECT id, version, updated_at, device_id, deleted, purchase_no,
+            fy_start_year, fy_serial, client_uuid
+     FROM purchases WHERE store_pk=$1 AND local_id=$2`,
+    [storePk, id]
+  );
+
+  let existing = await loadPurchase(localId);
+
+  // Purchase edit of a bill that has no client_uuid (typical after import):
+  // a new uuid remaps to a fresh local_id, then INSERT reuses purchase_no and
+  // hits purchases_store_pk_purchase_no_key. Stay on the original bill.
+  // New purchase save is unchanged: requested local_id is unused, so this is skipped.
+  if (!existing.rows[0] && requestedId > 0 && requestedId !== localId) {
+    const orig = await loadPurchase(requestedId);
+    const origRow = orig.rows[0];
+    if (origRow) {
+      const origUuid = origRow.client_uuid ? String(origRow.client_uuid).trim() : '';
+      const docNo = String(doc.purchase_no || '').trim();
+      const origNo = String(origRow.purchase_no || '').trim();
+      const sameBill = !origUuid || origUuid === (clientUuid || '') || !docNo || docNo === origNo;
+      if (sameBill) {
+        localId = requestedId;
+        existing = orig;
+      }
+    }
+  }
+
+  const meta = syncMeta(doc);
   if (shouldAcceptIncoming(existing.rows[0], { ...meta }) === 'skip') {
+    await persistClientUuid(client, 'purchases', storePk, localId, clientUuid);
     return { id: localId, status: 'skipped' };
   }
-  const fyStart = doc.fy_start_year ?? fyStartYearForDate(doc.purchase_date);
-  const purchaseNo = doc.purchase_no || encodePurchaseNo(doc.fy_serial || localId, fyStart);
+  const existingRow = existing.rows[0] || null;
+  const fyStart = existingRow?.fy_start_year
+    ?? doc.fy_start_year
+    ?? fyStartYearForDate(doc.purchase_date);
+  const fySerial = existingRow?.fy_serial ?? doc.fy_serial ?? null;
 
-  const result = await client.query(
-    `INSERT INTO purchases (
-       store_pk, local_id, purchase_no, supplier_id, purchase_date, bill_number,
-       subtotal, total_gst, cgst, sgst, total_amount, overall_discount, rounding,
-       need_to_pay, final_amount, amount_paid, amount_paid_at_entry, cash_paid_at_entry,
-       online_paid_at_entry, previous_due, previous_credit, due, current_credit, total_due,
-       due_amount, credit_amount, paid_due, bill_cleared, account_cleared, gst_calc_method,
-       expenditure, is_autosave, fy_start_year, fy_serial, supplier_name, supplier_phone,
-       item_count, created_at, updated_at, version, device_id, deleted, sync_status
-     ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
-       $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43
-     )
-     ON CONFLICT (store_pk, local_id) DO UPDATE SET
-       purchase_no=EXCLUDED.purchase_no, supplier_id=EXCLUDED.supplier_id, purchase_date=EXCLUDED.purchase_date,
-       bill_number=EXCLUDED.bill_number, subtotal=EXCLUDED.subtotal, total_gst=EXCLUDED.total_gst,
-       cgst=EXCLUDED.cgst, sgst=EXCLUDED.sgst, total_amount=EXCLUDED.total_amount,
-       overall_discount=EXCLUDED.overall_discount, rounding=EXCLUDED.rounding,
-       need_to_pay=EXCLUDED.need_to_pay, final_amount=EXCLUDED.final_amount,
-       amount_paid=EXCLUDED.amount_paid, amount_paid_at_entry=EXCLUDED.amount_paid_at_entry,
-       cash_paid_at_entry=EXCLUDED.cash_paid_at_entry, online_paid_at_entry=EXCLUDED.online_paid_at_entry,
-       previous_due=EXCLUDED.previous_due, previous_credit=EXCLUDED.previous_credit,
-       due=EXCLUDED.due, current_credit=EXCLUDED.current_credit, total_due=EXCLUDED.total_due,
-       due_amount=EXCLUDED.due_amount, credit_amount=EXCLUDED.credit_amount, paid_due=EXCLUDED.paid_due,
-       bill_cleared=EXCLUDED.bill_cleared, account_cleared=EXCLUDED.account_cleared,
-       gst_calc_method=EXCLUDED.gst_calc_method, expenditure=EXCLUDED.expenditure,
-       is_autosave=EXCLUDED.is_autosave, fy_start_year=EXCLUDED.fy_start_year, fy_serial=EXCLUDED.fy_serial,
-       supplier_name=EXCLUDED.supplier_name, supplier_phone=EXCLUDED.supplier_phone,
-       item_count=EXCLUDED.item_count, updated_at=EXCLUDED.updated_at, version=EXCLUDED.version,
-       device_id=EXCLUDED.device_id, deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status
-     RETURNING id`,
-    [
-      storePk, localId, purchaseNo, doc.supplier_id ?? null, doc.purchase_date, doc.bill_number || null,
-      Number(doc.subtotal || 0), Number(doc.total_gst || 0), Number(doc.cgst || 0), Number(doc.sgst || 0),
-      Number(doc.total_amount || 0), Number(doc.overall_discount || 0), Number(doc.rounding || 0),
-      Number(doc.need_to_pay || 0), Number(doc.final_amount || 0), Number(doc.amount_paid || 0),
-      Number(doc.amount_paid_at_entry || 0), Number(doc.cash_paid_at_entry || 0),
-      Number(doc.online_paid_at_entry || 0), Number(doc.previous_due || 0), Number(doc.previous_credit || 0),
-      Number(doc.due || 0), Number(doc.current_credit || 0), Number(doc.total_due || 0),
-      Number(doc.due_amount || 0), Number(doc.credit_amount || 0), Number(doc.paid_due || 0),
-      toBool(doc.bill_cleared), toBool(doc.account_cleared), doc.gst_calc_method || null,
-      Number(doc.expenditure || 0), toBool(doc.is_autosave), fyStart, doc.fy_serial ?? null,
-      doc.supplier_name || null, doc.supplier_phone || null,
-      Number(doc.item_count || (doc.items?.length || 0)), parseTs(doc.created_at),
-      writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
-    ]
-  );
+  // Edits never change purchase_no. Putting a colliding number into INSERT
+  // VALUES still raises unique_violation even with ON CONFLICT (local_id).
+  let purchaseNo = existingRow?.purchase_no
+    ? String(existingRow.purchase_no)
+    : String(doc.purchase_no || '').trim();
+  if (!purchaseNo) {
+    purchaseNo = encodePurchaseNo(
+      fySerial || localId,
+      fyStart,
+    );
+  }
+  if (!existingRow) {
+    const clash = await client.query(
+      `SELECT 1 FROM purchases WHERE store_pk=$1 AND purchase_no=$2 LIMIT 1`,
+      [storePk, purchaseNo]
+    );
+    if (clash.rows[0]) {
+      const dataMax = await maxExistingFySerial(client, storePk, 'purchases', fyStart);
+      const { rows: ctr } = await client.query(
+        `SELECT last_serial FROM fy_serials
+         WHERE store_pk=$1 AND kind='purchases' AND fy_start_year=$2`,
+        [storePk, fyStart]
+      );
+      purchaseNo = encodePurchaseNo(
+        Math.max(dataMax, Number(ctr[0]?.last_serial || 0)) + 1,
+        fyStart,
+      );
+    }
+  }
+
+  const moneyFields = [
+    doc.supplier_id ?? null, doc.purchase_date, doc.bill_number || null,
+    Number(doc.subtotal || 0), Number(doc.total_gst || 0), Number(doc.cgst || 0), Number(doc.sgst || 0),
+    Number(doc.total_amount || 0), Number(doc.overall_discount || 0), Number(doc.rounding || 0),
+    Number(doc.need_to_pay || 0), Number(doc.final_amount || 0), Number(doc.amount_paid || 0),
+    Number(doc.amount_paid_at_entry || 0), Number(doc.cash_paid_at_entry || 0),
+    Number(doc.online_paid_at_entry || 0), Number(doc.previous_due || 0), Number(doc.previous_credit || 0),
+    Number(doc.due || 0), Number(doc.current_credit || 0), Number(doc.total_due || 0),
+    Number(doc.due_amount || 0), Number(doc.credit_amount || 0), Number(doc.paid_due || 0),
+    toBool(doc.bill_cleared), toBool(doc.account_cleared), doc.gst_calc_method || null,
+    Number(doc.expenditure || 0), toBool(doc.is_autosave), fyStart, fySerial,
+    doc.supplier_name || null, doc.supplier_phone || null,
+    Number(doc.item_count || (doc.items?.length || 0)),
+    writeTimestamp(meta, existingRow), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+  ];
+
+  let result;
+  if (existingRow) {
+    result = await client.query(
+      `UPDATE purchases SET
+         supplier_id=$3, purchase_date=$4, bill_number=$5,
+         subtotal=$6, total_gst=$7, cgst=$8, sgst=$9, total_amount=$10,
+         overall_discount=$11, rounding=$12, need_to_pay=$13, final_amount=$14,
+         amount_paid=$15, amount_paid_at_entry=$16, cash_paid_at_entry=$17,
+         online_paid_at_entry=$18, previous_due=$19, previous_credit=$20,
+         due=$21, current_credit=$22, total_due=$23, due_amount=$24,
+         credit_amount=$25, paid_due=$26, bill_cleared=$27, account_cleared=$28,
+         gst_calc_method=$29, expenditure=$30, is_autosave=$31,
+         fy_start_year=$32, fy_serial=$33, supplier_name=$34, supplier_phone=$35,
+         item_count=$36, updated_at=$37, version=$38, device_id=$39,
+         deleted=$40, sync_status=$41
+       WHERE store_pk=$1 AND local_id=$2
+       RETURNING id`,
+      [storePk, localId, ...moneyFields]
+    );
+  } else {
+    result = await client.query(
+      `INSERT INTO purchases (
+         store_pk, local_id, purchase_no, supplier_id, purchase_date, bill_number,
+         subtotal, total_gst, cgst, sgst, total_amount, overall_discount, rounding,
+         need_to_pay, final_amount, amount_paid, amount_paid_at_entry, cash_paid_at_entry,
+         online_paid_at_entry, previous_due, previous_credit, due, current_credit, total_due,
+         due_amount, credit_amount, paid_due, bill_cleared, account_cleared, gst_calc_method,
+         expenditure, is_autosave, fy_start_year, fy_serial, supplier_name, supplier_phone,
+         item_count, created_at, updated_at, version, device_id, deleted, sync_status
+       ) VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+         $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43
+       )
+       RETURNING id`,
+      [
+        storePk, localId, purchaseNo, ...moneyFields.slice(0, -5),
+        parseTs(doc.created_at), ...moneyFields.slice(-5),
+      ]
+    );
+  }
   const purchasePk = result.rows[0].id;
-  await client.query(`DELETE FROM purchase_items WHERE purchase_id = $1`, [purchasePk]);
-  await multiInsert(
-    client,
-    'purchase_items',
-    [
-      'store_pk', 'purchase_id', 'medicine_id', 'name', 'qty', 'free_qty', 'type', 'hsn_code', 'gst_pct',
-      'mrp', 'rate', 'manufacturer', 'batch_no', 'expiry_date', 'schedule', 'discount_pct',
-      'taxable', 'gst_amt', 'item_amount',
-    ],
-    (doc.items || []).map((it) => [
-      storePk, purchasePk, it.medicine_id ?? null, it.name || null,
-      Number(it.qty || 0), Number(it.free_qty || 0), it.type || null, it.hsn_code || null,
-      Number(it.gst_pct ?? it.gst_percent ?? 0), Number(it.mrp || 0), Number(it.rate || 0),
-      it.manufacturer || null, it.batch_no || null, it.expiry_date || null, it.schedule || null,
-      Number(it.discount_pct ?? it.discount_percent ?? 0),
-      Number(it.taxable || 0), Number(it.gst_amt ?? it.gst_value ?? 0),
-      Number(it.item_amount ?? it.amount ?? 0),
-    ])
-  );
-  if (fyStart && doc.fy_serial && !toBool(doc.is_autosave)) {
+  if (Array.isArray(doc.items)) {
+    await client.query(`DELETE FROM purchase_items WHERE purchase_id = $1`, [purchasePk]);
+    const incomingItems = doc.items;
+    const medUnit = await loadMedicineUnits(client, storePk, incomingItems);
+    await multiInsert(
+      client,
+      'purchase_items',
+      [
+        'store_pk', 'purchase_id', 'medicine_id', 'name', 'qty', 'free_qty', 'type', 'hsn_code', 'gst_pct',
+        'mrp', 'rate', 'manufacturer', 'batch_no', 'expiry_date', 'schedule', 'discount_pct',
+        'taxable', 'gst_amt', 'item_amount', 'unit', 'tablets_per_stripe',
+      ],
+      incomingItems.map((it) => {
+        const pack = purchaseItemPack(it, medUnit.get(Number(it.medicine_id)));
+        return [
+          storePk, purchasePk, it.medicine_id ?? null,
+          it.name || it.medicine_name || null,
+          Number(it.qty || 0), Number(it.free_qty || 0), it.type || null, it.hsn_code || null,
+          Number(it.gst_pct ?? it.gst_percent ?? 0), Number(it.mrp || 0), Number(it.rate || 0),
+          it.manufacturer || null, it.batch_no || null, it.expiry_date || null, it.schedule || null,
+          Number(it.discount_pct ?? it.discount_percent ?? 0),
+          Number(it.taxable || 0), Number(it.gst_amt ?? it.gst_value ?? 0),
+          Number(it.item_amount ?? it.amount ?? 0),
+          pack.unit, pack.tablets_per_stripe,
+        ];
+      })
+    );
+  }
+  if (!existingRow && fyStart && fySerial && !toBool(doc.is_autosave)) {
     await client.query(
       `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
        VALUES ($1, 'purchases', $2, $3)
        ON CONFLICT (store_pk, kind, fy_start_year) DO UPDATE
          SET last_serial = GREATEST(fy_serials.last_serial, EXCLUDED.last_serial)`,
-      [storePk, fyStart, Number(doc.fy_serial)]
+      [storePk, fyStart, Number(fySerial)]
     );
+  }
+  await persistClientUuid(client, 'purchases', storePk, localId, clientUuid);
+  const supplierId = Number(doc.supplier_id);
+  if (supplierId > 0) {
+    try {
+      await cascadeSupplierAfterLedgerChange(client, storePk, supplierId, hint);
+    } catch (e) {
+      console.warn('[cascade] supplier after purchase:', e.message);
+    }
   }
   return { id: localId, status: 'upserted', purchase_no: purchaseNo, display_purchase_no: displayPurchaseNo(purchaseNo), fy_label: fyLabel(fyStart) };
 }
 
-async function upsertCustomerPayment(client, storePk, doc) {
+async function upsertCustomerPayment(client, storePk, doc, hint = null) {
   const localId = localIdOf(doc);
   const meta = syncMeta(doc);
   const existing = await client.query(
@@ -659,10 +945,23 @@ async function upsertCustomerPayment(client, storePk, doc) {
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
+  const customerId = Number(doc.customer_id);
+  if (customerId > 0) {
+    try {
+      await cascadeCustomerAfterLedgerChange(client, storePk, customerId, hint);
+      if (hint) {
+        await noteAcceptedChange(client, hint, storePk, 'customers', { id: customerId, local_id: customerId }, 'upserted', {
+          localId: customerId,
+        });
+      }
+    } catch (e) {
+      console.warn('[cascade] customer after payment:', e.message);
+    }
+  }
   return { id: localId, status: 'upserted' };
 }
 
-async function upsertSupplierPayment(client, storePk, doc) {
+async function upsertSupplierPayment(client, storePk, doc, hint = null) {
   const localId = localIdOf(doc);
   const meta = syncMeta(doc);
   const existing = await client.query(
@@ -690,6 +989,19 @@ async function upsertSupplierPayment(client, storePk, doc) {
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
+  const supplierId = Number(doc.supplier_id);
+  if (supplierId > 0) {
+    try {
+      await cascadeSupplierAfterLedgerChange(client, storePk, supplierId, hint);
+      if (hint) {
+        await noteAcceptedChange(client, hint, storePk, 'suppliers', { id: supplierId, local_id: supplierId }, 'upserted', {
+          localId: supplierId,
+        });
+      }
+    } catch (e) {
+      console.warn('[cascade] supplier after payment:', e.message);
+    }
+  }
   return { id: localId, status: 'upserted' };
 }
 
@@ -808,6 +1120,25 @@ const UPSERT_MAP = {
 export async function pushDocs(storePk, collection, docs) {
   const hint = newSyncHint(storePk);
 
+  if (collection === 'stock_operations') {
+    if (!Array.isArray(docs) || !docs.length) return { results: [], upserted: 0, skipped: 0 };
+    const out = await withTransaction(async (client) => {
+      await ensureStoreSyncState(client, storePk);
+      const results = [];
+      let upserted = 0;
+      let skipped = 0;
+      for (const doc of docs) {
+        const r = await applyStockOperation(client, storePk, doc, hint);
+        results.push(r);
+        if (r.status === 'applied') upserted++;
+        else skipped++;
+      }
+      return { results, upserted, skipped };
+    });
+    emitSyncHint(hint);
+    return { ...out, revisions: hint.revisions.slice() };
+  }
+
   if (collection === 'settings') {
     const out = await withTransaction(async (client) => {
       await ensureStoreSyncState(client, storePk);
@@ -854,20 +1185,24 @@ export async function pushDocs(storePk, collection, docs) {
     const results = [];
     let upserted = 0;
     let skipped = 0;
+    const accepted = [];
     for (const doc of docs) {
-      const r = await fn(client, storePk, doc);
+      const r = await fn(client, storePk, doc, hint);
       results.push(r);
       if (isAcceptedWrite(r.status)) {
         upserted++;
-        await noteAcceptedChange(client, hint, storePk, collection, doc, r.status);
+        accepted.push(acceptedChangeEntry(storePk, collection, doc, r.status, {
+          localId: r.id,
+        }));
       } else {
         skipped++;
       }
     }
+    await noteAcceptedChangeMany(client, hint, accepted);
     return { results, upserted, skipped };
   });
   emitSyncHint(hint);
-  return out;
+  return { ...out, revisions: hint.revisions.slice() };
 }
 
 export async function pushBundle(storePk, bundle) {
@@ -876,16 +1211,30 @@ export async function pushBundle(storePk, bundle) {
     'customers', 'suppliers', 'medicines', 'doctors',
     'sales', 'purchases', 'customer_payments', 'supplier_payments',
     'sales_returns', 'purchase_returns',
-    'general_products', 'stock_disposals', 'pending_orders',
+    'general_products', 'stock_disposals', 'stock_operations', 'pending_orders',
     'racks', 'sections', 'boxes', 'shelves', 'medicine_shelf', 'medicine_suppliers',
   ];
   const summary = {};
   const hint = newSyncHint(storePk);
   await withTransaction(async (client) => {
     await ensureStoreSyncState(client, storePk);
+    const deferredChanges = [];
     for (const col of order) {
       const docs = bundle[col];
       if (!docs?.length) continue;
+      if (col === 'stock_operations') {
+        const results = [];
+        let upserted = 0;
+        let skipped = 0;
+        for (const doc of docs) {
+          const r = await applyStockOperation(client, storePk, doc, hint);
+          results.push(r);
+          if (r.status === 'applied') upserted++;
+          else skipped++;
+        }
+        summary[col] = { results, upserted, skipped };
+        continue;
+      }
       if (FLAT_BULK.has(col)) {
         summary[col] = await pushFlatBulk(client, storePk, col, docs, hint);
         continue;
@@ -895,11 +1244,13 @@ export async function pushBundle(storePk, bundle) {
       let upserted = 0;
       let skipped = 0;
       for (const doc of docs) {
-        const r = await fn(client, storePk, doc);
+        const r = await fn(client, storePk, doc, hint);
         results.push(r);
         if (isAcceptedWrite(r.status)) {
           upserted++;
-          await noteAcceptedChange(client, hint, storePk, col, doc, r.status);
+          deferredChanges.push(acceptedChangeEntry(storePk, col, doc, r.status, {
+            localId: r.id,
+          }));
         } else {
           skipped++;
         }
@@ -913,10 +1264,9 @@ export async function pushBundle(storePk, bundle) {
         skipped: pr?.status === 'skipped' ? 1 : 0,
       };
       if (isAcceptedWrite(pr?.status)) {
-        await noteAcceptedChange(
-          client, hint, storePk, 'pharmacy_profile', bundle.pharmacy_profile, pr.status,
-          { localId: 0 },
-        );
+        deferredChanges.push(acceptedChangeEntry(
+          storePk, 'pharmacy_profile', bundle.pharmacy_profile, pr.status, { localId: 0 },
+        ));
       }
     }
     if (bundle.dropdowns) {
@@ -926,10 +1276,9 @@ export async function pushBundle(storePk, bundle) {
         skipped: dr?.status === 'skipped' ? 1 : 0,
       };
       if (isAcceptedWrite(dr?.status)) {
-        await noteAcceptedChange(
-          client, hint, storePk, 'dropdowns', bundle.dropdowns, dr.status,
-          { localId: 0 },
-        );
+        deferredChanges.push(acceptedChangeEntry(
+          storePk, 'dropdowns', bundle.dropdowns, dr.status, { localId: 0 },
+        ));
       }
     }
     if (bundle.shelf_settings) {
@@ -939,26 +1288,26 @@ export async function pushBundle(storePk, bundle) {
         skipped: sr?.status === 'skipped' ? 1 : 0,
       };
       if (isAcceptedWrite(sr?.status)) {
-        await noteAcceptedChange(
-          client, hint, storePk, 'shelf_settings', bundle.shelf_settings, sr.status,
-          { localId: 0 },
-        );
+        deferredChanges.push(acceptedChangeEntry(
+          storePk, 'shelf_settings', bundle.shelf_settings, sr.status, { localId: 0 },
+        ));
       }
     }
     if (bundle.settings) {
       summary.settings = await upsertSettingsKv(client, storePk, bundle.settings);
       if (summary.settings.upserted > 0) {
         const first = Array.isArray(bundle.settings) ? bundle.settings[0] : bundle.settings;
-        await noteAcceptedChange(client, hint, storePk, 'settings', null, 'upserted', {
+        deferredChanges.push(acceptedChangeEntry(storePk, 'settings', null, 'upserted', {
           localId: 0,
           deviceId: first?.device_id,
-        });
+        }));
       }
     }
+    await noteAcceptedChangeMany(client, hint, deferredChanges);
     return summary;
   });
   emitSyncHint(hint);
-  return summary;
+  return { ...summary, revisions: hint.revisions.slice() };
 }
 
 /** Soft-delete one entity and append changelog (operation=delete). */
@@ -987,7 +1336,105 @@ export async function softDeleteDoc(storePk, collection, localId, deviceId = nul
     return { deleted: true, id: Number(localId), status: 'soft_deleted' };
   });
   emitSyncHint(hint);
-  return out;
+  return { ...out, revisions: hint.revisions.slice() };
+}
+
+/**
+ * Permanent delete for sales / purchases (purge rows).
+ * Stock restore/reverse is done by the deleting client and pushed via medicines.
+ * Purchases: refuse if any item was sold.
+ */
+export async function hardDeleteDoc(storePk, collection, localId, deviceId = null) {
+  if (collection !== 'sales' && collection !== 'purchases') {
+    throw new AppError(400, 'Hard delete only supported for sales and purchases');
+  }
+  const lid = Number(localId);
+  if (!Number.isFinite(lid) || lid <= 0) {
+    throw new AppError(400, 'Invalid local id');
+  }
+  const hint = newSyncHint(storePk);
+  const out = await withTransaction(async (client) => {
+    await ensureStoreSyncState(client, storePk);
+    if (collection === 'sales') {
+      const { rows: sales } = await client.query(
+        `SELECT id, version, fy_start_year, bill_date FROM sales
+         WHERE store_pk=$1 AND local_id=$2 LIMIT 1`,
+        [storePk, lid],
+      );
+      if (!sales.length) {
+        await noteAcceptedChange(client, hint, storePk, 'sales', null, 'hard_deleted', {
+          localId: lid,
+          entityVersion: 1_000_000,
+          deviceId,
+        });
+        return { deleted: true, hard: true, id: lid, status: 'hard_deleted' };
+      }
+      const salePk = sales[0].id;
+      const prevVer = Number(sales[0].version || 1);
+      const saleFy = sales[0].fy_start_year || fyStartYearForDate(sales[0].bill_date);
+      await client.query(`DELETE FROM sales_items WHERE sale_id=$1`, [salePk]);
+      await client.query(`DELETE FROM sales WHERE id=$1`, [salePk]);
+      await rewindFySerialCounter(client, storePk, 'sales', saleFy);
+      await noteAcceptedChange(client, hint, storePk, 'sales', null, 'hard_deleted', {
+        localId: lid,
+        entityVersion: prevVer + 1_000_000,
+        deviceId,
+      });
+      return { deleted: true, hard: true, id: lid, status: 'hard_deleted' };
+    }
+
+    const { rows: purchases } = await client.query(
+      `SELECT id, version, fy_start_year, purchase_date FROM purchases
+       WHERE store_pk=$1 AND local_id=$2 LIMIT 1`,
+      [storePk, lid],
+    );
+    if (!purchases.length) {
+      await noteAcceptedChange(client, hint, storePk, 'purchases', null, 'hard_deleted', {
+        localId: lid,
+        entityVersion: 1_000_000,
+        deviceId,
+      });
+      return { deleted: true, hard: true, id: lid, status: 'hard_deleted' };
+    }
+    const purchasePk = purchases[0].id;
+    const prevPurVer = Number(purchases[0].version || 1);
+    const purchaseFy = purchases[0].fy_start_year
+      || fyStartYearForDate(purchases[0].purchase_date);
+    const { rows: pItems } = await client.query(
+      `SELECT medicine_id FROM purchase_items WHERE purchase_id=$1`,
+      [purchasePk],
+    );
+    const medIds = [...new Set(pItems.map((r) => Number(r.medicine_id || 0)).filter((n) => n > 0))];
+    if (medIds.length) {
+      const { rows: sold } = await client.query(
+        `SELECT 1
+         FROM sales_items si
+         JOIN sales s ON s.id = si.sale_id AND s.store_pk = si.store_pk
+         WHERE si.store_pk = $1
+           AND si.medicine_id = ANY($2::bigint[])
+           AND COALESCE(s.deleted, FALSE) = FALSE
+         LIMIT 1`,
+        [storePk, medIds],
+      );
+      if (sold.length) {
+        throw new AppError(
+          409,
+          'Cannot delete purchase — one or more items from this purchase have already been sold',
+        );
+      }
+    }
+    await client.query(`DELETE FROM purchase_items WHERE purchase_id=$1`, [purchasePk]);
+    await client.query(`DELETE FROM purchases WHERE id=$1`, [purchasePk]);
+    await rewindFySerialCounter(client, storePk, 'purchases', purchaseFy);
+    await noteAcceptedChange(client, hint, storePk, 'purchases', null, 'hard_deleted', {
+      localId: lid,
+      entityVersion: prevPurVer + 1_000_000,
+      deviceId,
+    });
+    return { deleted: true, hard: true, id: lid, status: 'hard_deleted' };
+  });
+  emitSyncHint(hint);
+  return { ...out, revisions: hint.revisions.slice() };
 }
 
 async function upsertPharmacyProfile(client, storePk, doc) {
@@ -1012,6 +1459,22 @@ async function upsertPharmacyProfile(client, storePk, doc) {
     [storePk]
   );
   const existing = rows[0];
+  const incomingBlank = !String(incoming.name || '').trim()
+    && !String(incoming.address || '').trim()
+    && !String(incoming.phone || '').trim()
+    && !String(incoming.gstin || '').trim()
+    && !String(incoming.dl_number || '').trim();
+  const existingFilled = existing && (
+    String(existing.name || '').trim()
+    || String(existing.address || '').trim()
+    || String(existing.phone || '').trim()
+    || String(existing.gstin || '').trim()
+    || String(existing.dl_number || '').trim()
+  );
+  // Folder-replace / empty in-memory Online clients must not wipe a filled profile.
+  if (existingFilled && incomingBlank) {
+    return { status: 'skipped' };
+  }
   if (
     existing &&
     sameScalarFields(existing, incoming, [
@@ -1045,16 +1508,26 @@ async function upsertPharmacyProfile(client, storePk, doc) {
 }
 
 async function upsertDropdowns(client, storePk, doc) {
-  const villages = JSON.stringify(doc.villages || []);
-  const medTypes = JSON.stringify(doc.med_types || []);
-  const schedules = JSON.stringify(doc.schedules || []);
-  const defaultVillage = doc.default_village || null;
   const { rows } = await client.query(
     `SELECT villages, default_village, med_types, schedules, updated_at
      FROM store_dropdowns WHERE store_pk=$1`,
     [storePk]
   );
   const existing = rows[0];
+  // Merge: omit/empty med_types or schedules must not wipe a peer's fuller layout.
+  const villagesIn = Array.isArray(doc.villages) ? doc.villages : (existing?.villages ?? []);
+  const defaultVillage = Object.prototype.hasOwnProperty.call(doc, 'default_village')
+    ? (doc.default_village || null)
+    : (existing?.default_village ?? null);
+  const medTypesIn = (Array.isArray(doc.med_types) && doc.med_types.length)
+    ? doc.med_types
+    : (existing?.med_types ?? doc.med_types ?? []);
+  const schedulesIn = (Array.isArray(doc.schedules) && doc.schedules.length)
+    ? doc.schedules
+    : (existing?.schedules ?? doc.schedules ?? []);
+  const villages = JSON.stringify(villagesIn || []);
+  const medTypes = JSON.stringify(medTypesIn || []);
+  const schedules = JSON.stringify(schedulesIn || []);
   if (existing) {
     const same =
       JSON.stringify(existing.villages ?? []) === villages &&
@@ -1086,7 +1559,9 @@ async function attachSaleItems(rows) {
   if (!rows.length) return rows;
   const ids = rows.map((r) => r._pk);
   const { rows: items } = await query(
-    `SELECT * FROM sales_items WHERE sale_id = ANY($1::bigint[])`,
+    `SELECT sale_id, medicine_id, name, type, batch_no, expiry_date, hsn_code, schedule,
+            manufacturer, qty, rate, gst_percent, amount, item_discount, cost_price
+     FROM sales_items WHERE sale_id = ANY($1::bigint[])`,
     [ids]
   );
   const bySale = new Map();
@@ -1113,18 +1588,31 @@ async function attachPurchaseItems(rows) {
   if (!rows.length) return rows;
   const ids = rows.map((r) => r._pk);
   const { rows: items } = await query(
-    `SELECT * FROM purchase_items WHERE purchase_id = ANY($1::bigint[])`,
+    `SELECT purchase_id, store_pk, medicine_id, name, qty, free_qty, type, hsn_code, gst_pct, mrp,
+            rate, manufacturer, batch_no, expiry_date, schedule, discount_pct, taxable, gst_amt,
+            item_amount, unit, tablets_per_stripe
+     FROM purchase_items WHERE purchase_id = ANY($1::bigint[])`,
     [ids]
   );
+  const needMed = items.filter((it) => {
+    const pack = purchaseItemPack(it);
+    return it.medicine_id && !pack.unit && !pack.tablets_per_stripe;
+  });
+  const storePk = needMed[0]?.store_pk;
+  const medUnit = await loadMedicineUnits({ query }, storePk, needMed);
   const byP = new Map();
   for (const it of items) {
     if (!byP.has(it.purchase_id)) byP.set(it.purchase_id, []);
+    const pack = purchaseItemPack(it, medUnit.get(Number(it.medicine_id)));
     byP.get(it.purchase_id).push({
       medicine_id: it.medicine_id, name: it.name, qty: Number(it.qty), free_qty: Number(it.free_qty),
       type: it.type, hsn_code: it.hsn_code, gst_pct: Number(it.gst_pct), mrp: Number(it.mrp),
       rate: Number(it.rate), manufacturer: it.manufacturer, batch_no: it.batch_no,
       expiry_date: it.expiry_date, schedule: it.schedule, discount_pct: Number(it.discount_pct),
       taxable: Number(it.taxable), gst_amt: Number(it.gst_amt), item_amount: Number(it.item_amount),
+      unit: pack.unit,
+      tablets_per_stripe: pack.tablets_per_stripe,
+      quantity_value: pack.unit,
     });
   }
   return rows.map(({ _pk, ...r }) => ({
@@ -1212,7 +1700,8 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
     case 'medicines':
       sql = `SELECT local_id AS id, name, type, stock_qty, unit, gst_percent, mrp, rate,
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
-                    is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status
+                    is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
              FROM medicines WHERE store_pk=$1${idFilter}${delClause}`;
       break;
     case 'sales':
@@ -1220,7 +1709,8 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
                     discount_pct, rounding, amount_paid, cash_paid, online_paid, previous_due, previous_credit,
                     due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
                     doctor_name, is_autosave, fy_start_year, fy_serial, customer_name, customer_phone,
-                    customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status
+                    customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
              FROM sales WHERE store_pk=$1${idFilter}${delClause}`;
       mapper = attachSaleItems;
       break;
@@ -1231,7 +1721,8 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
                     online_paid_at_entry, previous_due, previous_credit, due, current_credit, total_due,
                     due_amount, credit_amount, paid_due, bill_cleared, account_cleared, gst_calc_method,
                     expenditure, is_autosave, fy_start_year, fy_serial, supplier_name, supplier_phone,
-                    item_count, created_at, updated_at, version, device_id, deleted, sync_status
+                    item_count, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
              FROM purchases WHERE store_pk=$1${idFilter}${delClause}`;
       mapper = attachPurchaseItems;
       break;
@@ -1264,6 +1755,11 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
     case 'general_products':
       sql = `SELECT local_id AS id, name, rate, mrp, created_at, updated_at, version, device_id, deleted, sync_status
              FROM general_products WHERE store_pk=$1${idFilter}${delClause}`;
+      break;
+    case 'stock_operations':
+      sql = `SELECT local_id AS id, op_uuid, medicine_id, op, qty_delta, ref_collection, ref_id,
+                    revision, device_id, created_at
+             FROM stock_operations WHERE store_pk=$1${idFilter}`;
       break;
     case 'stock_disposals':
       sql = `SELECT local_id AS id, disposal_no, medicine_id, batch_no, supplier_id, purchase_id, bill_number,
@@ -1331,8 +1827,26 @@ export async function pullCollection(
   const lim = Math.min(Number(limit) || 5000, 5000);
 
   if (collection === 'pharmacy_profile') {
-    const { rows } = await query(`SELECT * FROM pharmacy_profiles WHERE store_pk = $1`, [storePk]);
-    return rows[0] || null;
+    const { rows } = await query(
+      `SELECT name, address, phone, email, gstin, dl_number, gst_enabled,
+              fssai_number, show_fssai_on_bill, logo_path
+       FROM pharmacy_profiles WHERE store_pk = $1`,
+      [storePk]
+    );
+    const r = rows[0];
+    if (!r) return null;
+    return {
+      name: r.name || '',
+      address: r.address || '',
+      phone: r.phone || '',
+      email: r.email || '',
+      gstin: r.gstin || '',
+      dl_number: r.dl_number || '',
+      gst_enabled: r.gst_enabled !== false,
+      fssai_number: r.fssai_number || '',
+      show_fssai_on_bill: Boolean(r.show_fssai_on_bill),
+      logo_path: r.logo_path || '',
+    };
   }
   if (collection === 'dropdowns') {
     const { rows } = await query(`SELECT * FROM store_dropdowns WHERE store_pk = $1`, [storePk]);
@@ -1376,7 +1890,8 @@ export async function pullCollection(
     case 'medicines':
       sql = `SELECT local_id AS id, name, type, stock_qty, unit, gst_percent, mrp, rate,
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
-                    is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status
+                    is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
              FROM medicines WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;
@@ -1385,7 +1900,8 @@ export async function pullCollection(
                     discount_pct, rounding, amount_paid, cash_paid, online_paid, previous_due, previous_credit,
                     due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
                     doctor_name, is_autosave, fy_start_year, fy_serial, customer_name, customer_phone,
-                    customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status
+                    customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
              FROM sales WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       mapper = attachSaleItems;
@@ -1397,7 +1913,8 @@ export async function pullCollection(
                     online_paid_at_entry, previous_due, previous_credit, due, current_credit, total_due,
                     due_amount, credit_amount, paid_due, bill_cleared, account_cleared, gst_calc_method,
                     expenditure, is_autosave, fy_start_year, fy_serial, supplier_name, supplier_phone,
-                    item_count, created_at, updated_at, version, device_id, deleted, sync_status
+                    item_count, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
              FROM purchases WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       mapper = attachPurchaseItems;
@@ -1436,6 +1953,12 @@ export async function pullCollection(
       sql = `SELECT local_id AS id, name, rate, mrp, created_at, updated_at, version, device_id, deleted, sync_status
              FROM general_products WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
+      break;
+    case 'stock_operations':
+      sql = `SELECT local_id AS id, op_uuid, medicine_id, op, qty_delta, ref_collection, ref_id,
+                    revision, device_id, created_at
+             FROM stock_operations WHERE store_pk=$1 AND created_at > $2
+             ORDER BY created_at ASC LIMIT $3`;
       break;
     case 'stock_disposals':
       sql = `SELECT local_id AS id, disposal_no, medicine_id, batch_no, supplier_id, purchase_id, bill_number,
@@ -1509,6 +2032,83 @@ export async function pullCollection(
   return mapper(rows);
 }
 
+/**
+ * Fetch one document by local_id (same shape as pullCollection rows).
+ * Sales / purchases / returns include nested items[].
+ */
+export async function pullDoc(storePk, collection, localId) {
+  const lid = Number(localId);
+  if (!Number.isFinite(lid) || lid <= 0) {
+    throw new AppError(400, 'Invalid local id');
+  }
+  const allowed = [...COLLECTIONS];
+  if (!allowed.includes(collection)) {
+    throw new AppError(400, `Unknown collection: ${collection}`);
+  }
+
+  let sql;
+  let mapper = async (rows) => rows;
+  switch (collection) {
+    case 'sales':
+      sql = `SELECT id AS _pk, local_id AS id, bill_no, customer_id, bill_date, total_amount, discount,
+                    discount_pct, rounding, amount_paid, cash_paid, online_paid, previous_due, previous_credit,
+                    due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
+                    doctor_name, is_autosave, fy_start_year, fy_serial, customer_name, customer_phone,
+                    customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
+             FROM sales WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
+      mapper = attachSaleItems;
+      break;
+    case 'purchases':
+      sql = `SELECT id AS _pk, local_id AS id, purchase_no, supplier_id, purchase_date, bill_number,
+                    subtotal, total_gst, cgst, sgst, total_amount, overall_discount, rounding,
+                    need_to_pay, final_amount, amount_paid, amount_paid_at_entry, cash_paid_at_entry,
+                    online_paid_at_entry, previous_due, previous_credit, due, current_credit, total_due,
+                    due_amount, credit_amount, paid_due, bill_cleared, account_cleared, gst_calc_method,
+                    expenditure, is_autosave, fy_start_year, fy_serial, supplier_name, supplier_phone,
+                    item_count, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
+             FROM purchases WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
+      mapper = attachPurchaseItems;
+      break;
+    case 'medicines':
+      sql = `SELECT local_id AS id, name, type, stock_qty, unit, gst_percent, mrp, rate,
+                    manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
+                    is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
+                    client_uuid
+             FROM medicines WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
+      break;
+    case 'customers':
+      sql = `SELECT local_id AS id, name, phone, address, document_name, total_due, total_credit,
+                    created_at, last_updated, updated_at, version, device_id, deleted, sync_status
+             FROM customers WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
+      break;
+    case 'suppliers':
+      sql = `SELECT local_id AS id, name, address, phone, gstin, dl_numbers, total_due, total_credit,
+                    created_at, updated_at, version, device_id, deleted, sync_status
+             FROM suppliers WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
+      break;
+    default:
+      // Fallback: reuse wide pull and filter (rare collections).
+      {
+        const rows = await pullCollection(storePk, collection, {
+          since: null,
+          includeDeleted: true,
+          limit: 5000,
+        });
+        const list = Array.isArray(rows) ? rows : [];
+        const found = list.find((d) => Number(d.id) === lid || Number(d.local_id) === lid);
+        if (!found) throw new AppError(404, `${collection}/${lid} not found`);
+        return found;
+      }
+  }
+
+  const { rows } = await query(sql, [storePk, lid]);
+  if (!rows.length) throw new AppError(404, `${collection}/${lid} not found`);
+  const mapped = await mapper(rows);
+  return Array.isArray(mapped) ? mapped[0] : mapped;
+}
+
 export async function pullAll(storePk, { since } = {}) {
   const out = {};
   for (const col of COLLECTIONS) {
@@ -1554,31 +2154,75 @@ async function maxExistingFySerial(client, storePk, kind, fy) {
        )`,
     [storePk, fy, from, to]
   );
-  for (const row of codes) {
+    for (const row of codes) {
     const raw = String(row.code || '');
     const display = raw.includes('/FY') ? raw.split('/FY')[0] : raw;
     let n = null;
     if (kind === 'sales') {
-      const m = display.match(/^SCB(\d+)$/i);
+      const m = display.match(/^SCB(\d+)$/i) || display.match(/^(\d+)$/);
       if (m) n = Number(m[1]);
-    } else if (/^\d+$/.test(display)) {
-      n = Number(display);
+    } else {
+      const m = display.match(/^(\d+)$/) || display.match(/^(?:APU)?(\d+)$/i);
+      if (m) n = Number(m[1]);
     }
     if (Number.isFinite(n)) maxSerial = Math.max(maxSerial, n);
   }
   return maxSerial;
 }
 
+/** Pull FY counter back to the highest live bill after the latest is deleted. */
+async function rewindFySerialCounter(client, storePk, kind, fyStartYear) {
+  const fy = Number(fyStartYear);
+  if (!Number.isFinite(fy) || fy <= 0) return;
+  const dataMax = await maxExistingFySerial(client, storePk, kind, fy);
+  await client.query(
+    `UPDATE fy_serials SET last_serial = $4
+     WHERE store_pk=$1 AND kind=$2 AND fy_start_year=$3
+       AND last_serial > $4`,
+    [storePk, kind, fy, dataMax]
+  );
+}
+
+/** Next FY serial without consuming a counter (for UI hints). */
+export async function peekFySerial(storePk, kind, dateValue) {
+  const fy = fyStartYearForDate(dateValue);
+  return withTransaction(async (client) => {
+    const dataMax = await maxExistingFySerial(client, storePk, kind, fy);
+    const serial = dataMax + 1;
+    if (kind === 'sales') {
+      return {
+        fy_start_year: fy,
+        fy_serial: serial,
+        bill_no: encodeSalesBillNo(serial, fy),
+        display_bill_no: `SCB${serial}`,
+        fy_label: fyLabel(fy),
+      };
+    }
+    return {
+      fy_start_year: fy,
+      fy_serial: serial,
+      purchase_no: encodePurchaseNo(serial, fy),
+      display_purchase_no: String(serial),
+      fy_label: fyLabel(fy),
+    };
+  });
+}
+
 /** Allocate next FY serial atomically (seeded from existing bills so we never restart at 1). */
 export async function allocateFySerial(storePk, kind, dateValue) {
   const fy = fyStartYearForDate(dateValue);
   return withTransaction(async (client) => {
+    await client.query(`SELECT pg_advisory_xact_lock($1, hashtext($2))`, [
+      Number(storePk),
+      `fy:${kind}:${fy}`,
+    ]);
     const dataMax = await maxExistingFySerial(client, storePk, kind, fy);
+    // Next number is max(live bills)+1 so deleting the latest reuses it.
     await client.query(
       `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (store_pk, kind, fy_start_year) DO UPDATE
-         SET last_serial = GREATEST(fy_serials.last_serial, EXCLUDED.last_serial)`,
+         SET last_serial = EXCLUDED.last_serial`,
       [storePk, kind, fy, dataMax]
     );
     const { rows } = await client.query(
@@ -1592,6 +2236,61 @@ export async function allocateFySerial(storePk, kind, dateValue) {
       return { fy_start_year: fy, fy_serial: serial, bill_no: encodeSalesBillNo(serial, fy), display_bill_no: `SCB${serial}`, fy_label: fyLabel(fy) };
     }
     return { fy_start_year: fy, fy_serial: serial, purchase_no: encodePurchaseNo(serial, fy), display_purchase_no: String(serial), fy_label: fyLabel(fy) };
+  });
+}
+
+/** Allocate next local_id values per collection (server-only clients, no SQLite autoincrement). */
+const ALLOCATE_TABLES = new Set([
+  'customers',
+  'suppliers',
+  'medicines',
+  'doctors',
+  'sales',
+  'purchases',
+  'customer_payments',
+  'supplier_payments',
+  'sales_returns',
+  'purchase_returns',
+  'general_products',
+  'stock_disposals',
+  'stock_operations',
+  'pending_orders',
+  'racks',
+  'sections',
+  'boxes',
+  'shelves',
+  'medicine_shelf',
+  'medicine_suppliers',
+]);
+
+export async function allocateLocalIds(storePk, requests = []) {
+  const list = Array.isArray(requests) ? requests : [];
+  if (!list.length) throw new AppError(400, 'requests array required');
+  return withTransaction(async (client) => {
+    const out = {};
+    for (const req of list) {
+      const collection = String(req?.collection || '').trim();
+      const count = Math.max(1, Math.min(100, Number(req?.count) || 1));
+      if (!ALLOCATE_TABLES.has(collection)) {
+        throw new AppError(400, `Cannot allocate ids for collection: ${collection}`);
+      }
+      await client.query(`SELECT pg_advisory_xact_lock($1, hashtext($2))`, [
+        Number(storePk),
+        collection,
+      ]);
+      const { rows } = await client.query(
+        `SELECT COALESCE(MAX(local_id), 0)::bigint AS mx FROM ${collection} WHERE store_pk = $1`,
+        [storePk]
+      );
+      let next = Number(rows[0]?.mx || 0);
+      const ids = [];
+      for (let i = 0; i < count; i += 1) {
+        next += 1;
+        ids.push(next);
+      }
+      out[collection] = ids.length === 1 ? ids[0] : ids;
+    }
+    return { ids: out };
   });
 }
 

@@ -29,7 +29,22 @@ router.get('/stores/:id', asyncHandler(async (req, res) => {
      FROM store_devices WHERE store_pk=$1 ORDER BY last_seen_at DESC NULLS LAST`,
     [store.id]
   );
-  ok(res, { store, profile: profile.rows[0] || null, devices: devices.rows, dashboard: dash });
+  const { getAdminSyncOverview } = await import('../services/syncRevision.js');
+  const sync = await getAdminSyncOverview(store.id);
+  ok(res, {
+    store,
+    profile: profile.rows[0] || null,
+    devices: devices.rows,
+    dashboard: dash,
+    sync,
+  });
+}));
+
+/** B4.3: revision / device lag / recent sync_changes */
+router.get('/stores/:id/sync', asyncHandler(async (req, res) => {
+  const store = await admin.getStore(req.params.id);
+  const { getAdminSyncOverview } = await import('../services/syncRevision.js');
+  ok(res, await getAdminSyncOverview(store.id));
 }));
 
 router.patch('/stores/:id', asyncHandler(async (req, res) => {

@@ -144,18 +144,32 @@ export async function upsertSimple(client, {
   return { id: localId, status: 'upserted', applied: true };
 }
 
+/** Non-empty trimmed text, or ''. */
+export function filledText(value) {
+  return String(value ?? '').trim();
+}
+
+/** Keep an existing filled phone/address when the incoming value is blank. */
+export function keepFilledText(incoming, existing) {
+  const next = filledText(incoming);
+  if (next) return next;
+  const prev = filledText(existing);
+  return prev || null;
+}
+
 /** True when a write was accepted (changelog should append). */
 export function isAcceptedWrite(status) {
   return (
     status === 'applied' ||
     status === 'upserted' ||
     status === 'stock_patched' ||
-    status === 'soft_deleted'
+    status === 'soft_deleted' ||
+    status === 'hard_deleted'
   );
 }
 
 /** Changelog operation for an accepted write status. */
 export function changelogOperation(status) {
-  if (status === 'soft_deleted') return 'delete';
+  if (status === 'soft_deleted' || status === 'hard_deleted') return 'delete';
   return 'upsert';
 }

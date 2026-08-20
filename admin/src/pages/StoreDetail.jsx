@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, fmtDate, inr } from '../api.js';
 
-const TABS = ['Dashboard', 'Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Doctors', 'Payments', 'Returns', 'Settings', 'Devices'];
+const TABS = ['Dashboard', 'Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Doctors', 'Payments', 'Returns', 'Settings', 'Devices', 'Sync'];
 
 function parseMaybeJson(value) {
   if (value == null || value === '') return null;
@@ -359,7 +359,7 @@ export default function StoreDetail() {
   useEffect(() => { loadStore(); }, [id]);
 
   useEffect(() => {
-    if (!data || tab === 'Dashboard' || tab === 'Devices') return;
+    if (!data || tab === 'Dashboard' || tab === 'Devices' || tab === 'Sync') return;
     let cancelled = false;
     (async () => {
       try {
@@ -415,7 +415,7 @@ export default function StoreDetail() {
   if (error && !data) return <div className="error">{error}</div>;
   if (!data) return <p className="muted">Loading store…</p>;
 
-  const { store, profile, devices, dashboard: dash } = data;
+  const { store, profile, devices, dashboard: dash, sync } = data;
 
   return (
     <>
@@ -737,6 +737,89 @@ export default function StoreDetail() {
               {!devices?.length && <tr><td colSpan={4} className="empty">No devices paired yet</td></tr>}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {tab === 'Sync' && (
+        <div style={{ display: 'grid', gap: 16 }}>
+          <div className="panel" style={{ padding: 16 }}>
+            <div className="panel-h" style={{ padding: '0 0 12px' }}>
+              <h3 style={{ margin: 0 }}>Revision sync</h3>
+              <button className="btn sm" onClick={loadStore}>Refresh</button>
+            </div>
+            <FieldGrid
+              rows={[
+                ['Head revision', sync?.head_revision ?? '—'],
+                ['Head updated', sync?.head_updated_at ? new Date(sync.head_updated_at).toLocaleString() : '—'],
+                ['Devices tracked', (sync?.devices || []).length],
+              ]}
+            />
+          </div>
+
+          <div className="panel">
+            <div className="panel-h"><h3 style={{ margin: 0 }}>Device lag</h3></div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Device</th>
+                  <th>Type</th>
+                  <th>Last ack</th>
+                  <th>Lag (rev)</th>
+                  <th>Last seen</th>
+                  <th>Lag (sec)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(sync?.devices || []).map((d) => (
+                  <tr key={d.device_id}>
+                    <td>
+                      <div>{d.device_name || '—'}</div>
+                      <div className="mono muted" style={{ fontSize: '0.75rem' }}>{d.device_id}</div>
+                    </td>
+                    <td><span className="badge">{d.device_type || '—'}</span></td>
+                    <td className="mono">{d.last_ack_revision}</td>
+                    <td className="mono">{d.lag_revisions}</td>
+                    <td>{d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : '—'}</td>
+                    <td className="mono">{d.lag_seconds == null ? '—' : d.lag_seconds}</td>
+                  </tr>
+                ))}
+                {!(sync?.devices || []).length && (
+                  <tr><td colSpan={6} className="empty">No devices paired yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="panel">
+            <div className="panel-h"><h3 style={{ margin: 0 }}>Last 50 sync_changes</h3></div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Rev</th>
+                  <th>Collection</th>
+                  <th>Local ID</th>
+                  <th>Op</th>
+                  <th>Device</th>
+                  <th>When</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(sync?.recent_changes || []).map((c) => (
+                  <tr key={c.revision}>
+                    <td className="mono">{c.revision}</td>
+                    <td>{c.collection}</td>
+                    <td className="mono">{c.local_id}</td>
+                    <td><span className="badge">{c.operation}</span></td>
+                    <td className="mono" style={{ fontSize: '0.75rem' }}>{c.device_id || '—'}</td>
+                    <td>{c.created_at ? new Date(c.created_at).toLocaleString() : '—'}</td>
+                  </tr>
+                ))}
+                {!(sync?.recent_changes || []).length && (
+                  <tr><td colSpan={6} className="empty">No sync changes yet</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </>

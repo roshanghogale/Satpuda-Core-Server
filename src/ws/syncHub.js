@@ -1,14 +1,18 @@
 /**
- * WebSocket sync hub — revision-only sync_hint broadcasts (never full payloads).
+ * WebSocket sync hub — store-scoped sync_hint broadcasts (never full entity payloads).
  * Path: /ws/sync
  * Auth: ?token= JWT or first message { type: 'auth', token }
  */
 import { WebSocketServer } from 'ws';
 import jwt from 'jsonwebtoken';
 import { config } from '../config/index.js';
+import { ackDeviceRevision } from '../services/syncRevision.js';
 
 /** @type {Map<number, Set<import('ws').WebSocket>>} */
 const storeSockets = new Map();
+
+/** Max change entries on one WS hint before clients must do a full list refresh. */
+export const SYNC_HINT_MAX_CHANGES = 50;
 
 function verifyStoreToken(token) {
   if (!token) return null;
@@ -89,7 +93,6 @@ export function attachSyncHub(httpServer) {
           ws.close(4401, 'unauthorized');
           return;
         }
-        // Re-auth: drop previous store mapping
         if (storePk != null) removeSocket(storePk, ws);
         storePk = a.storePk;
         deviceId = a.deviceId;
@@ -115,6 +118,19 @@ export function attachSyncHub(httpServer) {
 
       if (msg?.type === 'ping') {
         sendJson(ws, { type: 'pong' });
+        return;
+      }
+
+      if (msg?.type === 'ack') {
+        if (storePk == null) {
+          sendJson(ws, { type: 'error', error: 'unauthorized' });
+          return;
+        }
+        const rev = msg.revision ?? msg.head_revision;
+        const did = deviceId || msg.device_id || null;
+        ackDeviceRevision(storePk, did, rev)
+          .then((r) => sendJson(ws, { type: 'ack_ok', ...r }))
+          .catch(() => sendJson(ws, { type: 'error', error: 'ack_failed' }));
       }
     });
 
@@ -132,24 +148,36 @@ export function attachSyncHub(httpServer) {
 }
 
 /**
- * Broadcast revision-only hint to all subscribers for a store.
- * Never includes entity payloads.
+ * Broadcast store-scoped sync_hint to peers (never entity bodies).
  */
-export function broadcastSyncHint(storePk, { head_revision, source_device_id = null } = {}) {
+export function broadcastSyncHint(
+  storePk,
+  {
+    head_revision,
+    source_device_id = null,
+    changes = [],
+    full_refresh = false,
+  } = {},
+) {
   const set = storeSockets.get(Number(storePk));
   if (!set?.size) return;
+  const list = Array.isArray(changes) ? changes : [];
+  const overflow = list.length > SYNC_HINT_MAX_CHANGES;
   const msg = JSON.stringify({
     type: 'sync_hint',
     head_revision: Number(head_revision),
     source_device_id: source_device_id || null,
+    changes: overflow || full_refresh ? [] : list.slice(0, SYNC_HINT_MAX_CHANGES),
+    full_refresh: Boolean(full_refresh || overflow),
   });
+  const src = source_device_id || null;
   for (const ws of set) {
-    if (ws.readyState === 1) {
-      try {
-        ws.send(msg);
-      } catch {
-        /* ignore */
-      }
+    if (ws.readyState !== 1) continue;
+    if (src && ws.deviceId && String(ws.deviceId) === String(src)) continue;
+    try {
+      ws.send(msg);
+    } catch {
+      /* ignore */
     }
   }
 }
