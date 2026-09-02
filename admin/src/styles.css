@@ -320,3 +320,48 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   border-radius: 8px;
   padding: 8px 10px;
 }
+
+
+/* ── Mobile / Android support ──────────────────────────────────────────────
+   The panel was desktop-only: one 960px breakpoint that collapsed the sidebar,
+   but nothing below it. On a phone the data tables forced the whole page to
+   scroll sideways, tap targets were mouse-sized, and inputs under 16px made
+   iOS/Android zoom on focus. These rules make it usable on a handset. */
+
+/* Any table can scroll inside its own panel instead of stretching the page. */
+.panel { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { min-width: max-content; }
+
+@media (max-width: 720px) {
+  .main { padding: 14px 12px 40px; }
+
+  /* Sidebar becomes a horizontally scrollable tab strip. */
+  .sidebar {
+    position: sticky; top: 0; z-index: 20;
+    flex-wrap: nowrap; overflow-x: auto; gap: 4px;
+    padding: 8px 10px; border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .sidebar a, .sidebar button { white-space: nowrap; flex: 0 0 auto; }
+
+  /* Thumb-sized targets — 44px is the accessibility minimum. */
+  button, .btn, .sidebar a { min-height: 44px; }
+
+  /* 16px stops mobile browsers zooming the viewport on focus. */
+  input, select, textarea { font-size: 16px; min-height: 44px; }
+
+  /* Stat tiles two-up rather than one giant column. */
+  .grid.stats { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+  .grid, .grid.two, .grid.three { grid-template-columns: 1fr; }
+
+  table { font-size: 0.82rem; }
+  th, td { padding: 8px 10px; white-space: nowrap; }
+
+  h1 { font-size: 1.35rem; }
+  h2 { font-size: 1.1rem; }
+}
+
+@media (max-width: 420px) {
+  .grid.stats { grid-template-columns: 1fr 1fr; }
+  .main { padding: 12px 8px 36px; }
+}
