@@ -11,3 +11,17 @@ backups/
 postgres-credentials.txt
 *-credentials.txt
 
+
+# Python venv on the server (2,900+ files, never source)
+.venv/
+
+# Service-account keys and any other secret material. This repo is PUBLIC.
+secrets/
+*service_account*.json
+*.pem
+*.p12
+
+# Local scratch / one-off test scripts written while debugging on the box
+*-test.mjs
+_verify_*.js
+firebase_import_report.json
