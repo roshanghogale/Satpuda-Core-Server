@@ -11,6 +11,7 @@ import { config } from './config/index.js';
 import { errorMiddleware } from './utils/http.js';
 import authRoutes from './routes/auth.js';
 import syncRoutes from './routes/sync.js';
+import storeQueryRoutes from './routes/storeQuery.js';
 import adminRoutes from './routes/admin.js';
 import masterMedicineRoutes from './routes/masterMedicines.js';
 import { attachSyncHub } from './ws/syncHub.js';
@@ -20,7 +21,7 @@ const app = express();
 
 app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(compression());
+app.use(compression({ threshold: 1024 }));
 app.use(
   cors({
     origin: config.corsOrigins.includes('*') ? true : config.corsOrigins,
@@ -29,7 +30,14 @@ app.use(
 );
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
-app.use(morgan(config.env === 'production' ? 'combined' : 'dev'));
+app.use(
+  morgan(config.env === 'production' ? 'combined' : 'dev', {
+    skip: (req) => {
+      const u = String(req.originalUrl || '');
+      return u === '/api/health' || u.includes('/sync/status');
+    },
+  })
+);
 
 // General API budget (auth, admin, health). Sync uses a higher ceiling because
 // store pull/push is page-based and can legitimately issue many requests/min.
@@ -39,7 +47,10 @@ const generalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { ok: false, error: 'Too many requests. Slow down and retry.' },
-  skip: (req) => String(req.originalUrl || '').startsWith('/api/sync'),
+  skip: (req) => {
+    const u = String(req.originalUrl || '');
+    return u.startsWith('/api/sync') || u.startsWith('/api/store');
+  },
 });
 const syncLimiter = rateLimit({
   windowMs: 60_000,
@@ -51,10 +62,12 @@ const syncLimiter = rateLimit({
 
 app.use('/api/', generalLimiter);
 app.use('/api/sync', syncLimiter);
+app.use('/api/store', syncLimiter);
 app.use('/api/master-medicines', syncLimiter);
 
 app.use('/api', authRoutes);
 app.use('/api/sync', syncRoutes);
+app.use('/api/store', storeQueryRoutes);
 app.use('/api/master-medicines', masterMedicineRoutes);
 app.use('/api/admin', adminRoutes);
 

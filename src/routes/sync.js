@@ -7,11 +7,20 @@ import {
   pushDocs,
   pushBundle,
   pullCollection,
+  pullDoc,
   pullAll,
   allocateFySerial,
+  peekFySerial,
   softDeleteDoc,
+  hardDeleteDoc,
+  allocateLocalIds,
 } from '../services/syncService.js';
-import { getSyncStatus, getChanges, getChangesFull } from '../services/syncRevision.js';
+import {
+  getSyncStatus,
+  getChanges,
+  getChangesFull,
+  ackDeviceRevision,
+} from '../services/syncRevision.js';
 
 const router = Router();
 router.use(requireStore);
@@ -49,14 +58,51 @@ router.get('/changes', asyncHandler(async (req, res) => {
   ok(res, full ? await getChangesFull(pk, opts) : await getChanges(pk, opts));
 }));
 
+/** Option B: primary client endpoint — changelog + entity docs */
+router.get('/changes/full', asyncHandler(async (req, res) => {
+  ok(
+    res,
+    await getChangesFull(await storePk(req), {
+      after: req.query.after,
+      limit: req.query.limit,
+    }),
+  );
+}));
+
+/** B4.3: device acknowledges applied head revision (admin lag) */
+router.post('/ack', asyncHandler(async (req, res) => {
+  const pk = await storePk(req);
+  const deviceId = req.auth?.deviceId || req.body?.device_id || null;
+  const revision = req.body?.revision ?? req.body?.head_revision;
+  ok(res, await ackDeviceRevision(pk, deviceId, revision));
+}));
+
 router.post('/bundle', asyncHandler(async (req, res) => {
   ok(res, await pushBundle(await storePk(req), req.body || {}));
+}));
+
+/** Allocate next local_id(s) for server-only clients */
+router.post('/allocate-ids', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const requests = Array.isArray(body.requests)
+    ? body.requests
+    : body.collection
+      ? [{ collection: body.collection, count: body.count || 1 }]
+      : [];
+  ok(res, await allocateLocalIds(await storePk(req), requests));
 }));
 
 router.post('/fy/allocate', asyncHandler(async (req, res) => {
   const { kind, date } = req.body || {};
   if (!['sales', 'purchases'].includes(kind)) throw new AppError(400, 'kind must be sales|purchases');
   ok(res, await allocateFySerial(await storePk(req), kind, date));
+}));
+
+router.get('/fy/peek', asyncHandler(async (req, res) => {
+  const kind = req.query.kind;
+  const date = req.query.date;
+  if (!['sales', 'purchases'].includes(kind)) throw new AppError(400, 'kind must be sales|purchases');
+  ok(res, await peekFySerial(await storePk(req), kind, date));
 }));
 
 router.put('/settings/pharmacy_profile', asyncHandler(async (req, res) => {
@@ -86,18 +132,22 @@ router.get('/settings/kv', asyncHandler(async (req, res) => {
   ok(res, await pullCollection(await storePk(req), 'settings', { since: req.query.since }));
 }));
 
-/** Soft-delete (appends sync_changes with operation=delete) */
+/** Soft-delete masters; permanent hard-delete for sales/purchases */
 router.delete('/:collection/:localId', asyncHandler(async (req, res) => {
   const { collection, localId } = req.params;
-  ok(
-    res,
-    await softDeleteDoc(
-      await storePk(req),
-      collection,
-      Number(localId),
-      req.auth.deviceId || null,
-    ),
-  );
+  const deviceId = req.auth.deviceId || null;
+  const pk = await storePk(req);
+  if (collection === 'sales' || collection === 'purchases') {
+    ok(res, await hardDeleteDoc(pk, collection, Number(localId), deviceId));
+    return;
+  }
+  ok(res, await softDeleteDoc(pk, collection, Number(localId), deviceId));
+}));
+
+/** Pull one document by local id (Online edit / refresh) */
+router.get('/:collection/:localId', asyncHandler(async (req, res) => {
+  assertCollection(req.params.collection);
+  ok(res, await pullDoc(await storePk(req), req.params.collection, req.params.localId));
 }));
 
 /** Push one collection (create/update) */

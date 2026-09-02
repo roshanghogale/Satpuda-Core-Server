@@ -23,8 +23,6 @@ router.get('/meta', (_req, res) => {
     name: 'satpuda-core-server',
     version: '1.0.1',
     api_revision: 2,
-    vps_ip: '200.234.32.222',
-    github: 'https://github.com/roshanghogale/Satpuda-Core-Server.git',
     collections: [
       'customers', 'suppliers', 'medicines', 'doctors',
       'sales', 'purchases', 'customer_payments', 'supplier_payments',
@@ -85,8 +83,14 @@ router.put('/auth/license', requireStoreIdentity, asyncHandler(async (req, res) 
   const storePk = req.auth.storePk || req.auth.store?.id;
   // Devices may update expiry settings + record activation_date.
   // is_active is admin-panel only (turn off access from server).
+  // A device may report WHEN it was activated. It must not be able to change
+  // whether the licence is enforced — passing {apply_expiry_check:false} used to
+  // disable expiry permanently, and requireStoreIdentity deliberately skips the
+  // access gate, so even an already-expired store could un-expire itself.
   const body = { ...(req.body || {}) };
-  delete body.is_active;
+  for (const k of ['is_active', 'expiry_enabled', 'apply_expiry_check', 'expiry_date', 'force_activation_date']) {
+    delete body[k];
+  }
   ok(res, await updateStoreLicense(storePk, body));
 }));
 

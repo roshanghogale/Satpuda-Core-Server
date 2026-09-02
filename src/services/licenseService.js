@@ -15,6 +15,8 @@ function toDateOnly(value) {
   return raw;
 }
 
+let _istTodayCache = { day: '', expires: 0 };
+
 /** Today's calendar date in Asia/Kolkata (IST). */
 export function istToday(d = new Date()) {
   return new Intl.DateTimeFormat('en-CA', {
@@ -23,6 +25,14 @@ export function istToday(d = new Date()) {
     month: '2-digit',
     day: '2-digit',
   }).format(d);
+}
+
+function cachedIstToday() {
+  const now = Date.now();
+  if (_istTodayCache.expires > now && _istTodayCache.day) return _istTodayCache.day;
+  const day = istToday();
+  _istTodayCache = { day, expires: now + 30_000 };
+  return day;
 }
 
 function istDateOnlyFromUtc(date) {
@@ -154,6 +164,12 @@ export async function updateStoreLicense(storePk, patch = {}) {
     vals
   );
   if (!rows[0]) throw new AppError(404, 'Store not found');
+  try {
+    const { invalidateStoreAuthCache } = await import('../middleware/auth.js');
+    invalidateStoreAuthCache(storePk);
+  } catch {
+    /* cache is optional */
+  }
   return licensePayload(rows[0]);
 }
 
@@ -195,11 +211,7 @@ export async function refreshExpiryFromActivation(days = DEFAULT_EXPIRY_DAYS, op
 }
 
 export async function assertStoreAccess(store) {
-  // Prefer IST calendar date from Postgres for consistency with DATE columns.
-  const { rows } = await query(
-    `SELECT (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::text AS today`
-  );
-  const today = rows[0]?.today || istToday();
+  const today = cachedIstToday();
   const access = evaluateAccess(store, today);
   if (access.blocked) {
     const msg =

@@ -44,8 +44,8 @@ export async function pairStore({ androidKey, storeName, deviceId, deviceType = 
   );
   const store = rows[0];
   if (!store) throw new AppError(404, 'Invalid store key');
-  const { assertStoreAccess } = await import('../services/licenseService.js');
-  await assertStoreAccess(store);
+  // Do not assertStoreAccess here — pairing only proves the SC- key so clients can
+  // refresh JWT and call /auth/license. Business APIs still enforce access.
   if (storeName) {
     const a = String(storeName).trim().toLowerCase();
     const b = String(store.store_name).trim().toLowerCase();
@@ -62,8 +62,39 @@ export async function pairStore({ androidKey, storeName, deviceId, deviceType = 
       [store.id, deviceId, deviceName || null, deviceType]
     );
   }
+  // Pairing is always allowed when the SC- key is valid so devices can refresh
+  // JWT and read /auth/license. Business APIs still enforce assertStoreAccess.
   const token = signStoreToken(store, deviceId);
   return { store, token };
+}
+
+const STORE_AUTH_TTL_MS = 45_000;
+const _storeAuthCache = new Map();
+
+const STORE_AUTH_COLS = `id, store_id, store_key, store_name, is_active,
+  activation_date, expiry_enabled, expiry_date, apply_expiry_check`;
+
+export function invalidateStoreAuthCache(storePk = null) {
+  if (storePk == null) {
+    _storeAuthCache.clear();
+    return;
+  }
+  _storeAuthCache.delete(Number(storePk));
+}
+
+async function loadStoreForAuth(storePk) {
+  const id = Number(storePk);
+  const hit = _storeAuthCache.get(id);
+  if (hit && hit.expires > Date.now()) return hit.store;
+  const { rows } = await query(
+    `SELECT ${STORE_AUTH_COLS} FROM stores WHERE id = $1`,
+    [id],
+  );
+  const store = rows[0] || null;
+  if (store) {
+    _storeAuthCache.set(id, { store, expires: Date.now() + STORE_AUTH_TTL_MS });
+  }
+  return store;
 }
 
 export function requireAuth(roles = ['admin', 'store']) {
@@ -85,27 +116,25 @@ export function requireAuth(roles = ['admin', 'store']) {
       if (payload.typ === 'admin') {
         req.auth = { type: 'admin', adminId: Number(payload.sub), username: payload.username };
       } else if (payload.typ === 'store') {
-        const { rows } = await query(
-          `SELECT * FROM stores WHERE id = $1`,
-          [Number(payload.sub)]
-        );
-        if (!rows[0]) throw new AppError(401, 'Store not found');
+        const store = await loadStoreForAuth(Number(payload.sub));
+        if (!store) throw new AppError(401, 'Store not found');
         const { assertStoreAccess, licensePayload } = await import('../services/licenseService.js');
-        await assertStoreAccess(rows[0]);
+        await assertStoreAccess(store);
         req.auth = {
           type: 'store',
-          storePk: rows[0].id,
-          storeId: rows[0].store_id,
-          storeKey: rows[0].store_key,
+          storePk: store.id,
+          storeId: store.store_id,
+          storeKey: store.store_key,
           deviceId: payload.device_id,
-          store: rows[0],
-          license: licensePayload(rows[0]),
+          store,
+          license: licensePayload(store),
         };
-        if (payload.device_id) {
+        const url = String(req.originalUrl || '');
+        if (payload.device_id && !url.includes('/sync/status')) {
           query(
             `UPDATE store_devices SET last_seen_at = NOW()
              WHERE store_pk = $1 AND device_id = $2`,
-            [rows[0].id, payload.device_id]
+            [store.id, payload.device_id]
           ).catch(() => {});
         }
       }
@@ -142,17 +171,17 @@ export function requireStoreIdentity(req, _res, next) {
         return next();
       }
       if (payload.typ !== 'store') throw new AppError(403, 'Forbidden');
-      const { rows } = await query(`SELECT * FROM stores WHERE id = $1`, [Number(payload.sub)]);
-      if (!rows[0]) throw new AppError(401, 'Store not found');
+      const store = await loadStoreForAuth(Number(payload.sub));
+      if (!store) throw new AppError(401, 'Store not found');
       const { licensePayload } = await import('../services/licenseService.js');
       req.auth = {
         type: 'store',
-        storePk: rows[0].id,
-        storeId: rows[0].store_id,
-        storeKey: rows[0].store_key,
+        storePk: store.id,
+        storeId: store.store_id,
+        storeKey: store.store_key,
         deviceId: payload.device_id,
-        store: rows[0],
-        license: licensePayload(rows[0]),
+        store,
+        license: licensePayload(store),
       };
       next();
     } catch (err) {

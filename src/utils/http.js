@@ -20,13 +20,25 @@ export function fail(res, status, message, details = null) {
   return res.status(status).json({ ok: false, error: message, details });
 }
 
+let _errSeq = 0;
+
 export function errorMiddleware(err, req, res, _next) {
   const status = err.status || 500;
-  const message = err.message || 'Internal server error';
-  if (status >= 500) console.error('[error]', req.method, req.path, err);
+  if (status >= 500) {
+    // Never hand internals to a client: Postgres errors carry SQL fragments,
+    // column names and constraint names. Log the detail, return a reference.
+    const ref = `E${Date.now().toString(36)}${(++_errSeq).toString(36)}`;
+    console.error(`[error][${ref}]`, req.method, req.path, err);
+    return res.status(status).json({
+      ok: false,
+      error: 'Something went wrong on the server. Quote reference ' + ref + ' to support.',
+      ref,
+    });
+  }
+  // Deliberate AppErrors are safe and useful to the client.
   res.status(status).json({
     ok: false,
-    error: message,
+    error: err.message || 'Request failed',
     details: err.details || undefined,
   });
 }
