@@ -20,15 +20,41 @@ export function isStripCountType(medType, unit) {
   return isStripCountUnit(unit);
 }
 
+/**
+ * A liquid/powder pack size (500ML, 100GM, 1LTR) — never a strip count.
+ *
+ * This is `pack_is_volume_or_weight` from the desktop
+ * (`mac2/core/bill_import_normalize.py:35-38, 143-148`), regex for regex:
+ *   ^\d+(?:\.\d+)?\s*(GM|G|MG|ML|MD|KG|L|LI|LTR|LT)$   case-insensitive,
+ * matched after whitespace is stripped.
+ */
+const VOLUME_PACK_RE = /^\d+(?:\.\d+)?(GM|G|MG|ML|MD|KG|L|LI|LTR|LT)$/i;
+
+export function packIsVolumeOrWeight(pack) {
+  const text = String(pack ?? '').trim().replace(/\s+/g, '');
+  if (!text) return false;
+  return VOLUME_PACK_RE.test(text);
+}
+
 export function parseTabletsPerStripe(unitStr) {
   const s = String(unitStr ?? '').trim();
   if (!s) return 1;
   if (isStripCountUnit(s)) return 1;
-  const lower = s.toLowerCase();
-  if (/\b(ml|mg|g|gm|kg|l)\b/.test(lower) && !/^\d+(\.\d+)?$/.test(s)) {
-    // volume/weight pack labels → treat as 1 (same spirit as Offline)
-    if (!/^\d/.test(s)) return 1;
-  }
+  // The guard this replaces was `/\b(ml|mg|g|gm|kg|l)\b/` — and there is NO word
+  // boundary between the `0` of "30" and the `m` of "ml", because both are word
+  // characters. So "30ML" never matched, fell through to "first digit group", and
+  // came back as tps = 30 where the desktop says 1.
+  //
+  // Live Roshan, medicine 900038 STECLIN INJ 30ML (type Bolus, so isStripCountType is
+  // true), stock 2 at MRP 315: the desktop values it at 630.00 and this valued it at
+  // 21.00, and the store's Stock Value tile therefore read 344,854.86 here against
+  // 345,463.86 on the desktop — a Rs 609 gap on the owner's headline tile, with both
+  // clients showing THIS number because online reads the server. The same divergence
+  // feeds effectiveCostPerUnit, so every profit figure inherited it.
+  //
+  // Any <digits>ML / <digits>GM / <digits>LTR unit on a Tablet, Bolus or Capsule row
+  // hits this; STECLIN is just the one row in Roshan that does today.
+  if (packIsVolumeOrWeight(s)) return 1;
   const xMatch = s.match(/^1\s*[Xx×*]\s*(\d+)$/);
   if (xMatch) return Math.max(1, parseInt(xMatch[1], 10));
   const asFloat = Number(s);

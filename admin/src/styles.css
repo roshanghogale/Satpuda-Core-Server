@@ -365,3 +365,8 @@ table { min-width: max-content; }
   .grid.stats { grid-template-columns: 1fr 1fr; }
   .main { padding: 12px 8px 36px; }
 }
+
+/* Delete on the Demo logins page: it removes a person's access, so it should
+   not look like the buttons beside it. */
+.btn.danger { color: var(--danger); border-color: rgba(240, 113, 120, 0.4); }
+.btn.danger:hover { background: rgba(240, 113, 120, 0.12); border-color: var(--danger); }

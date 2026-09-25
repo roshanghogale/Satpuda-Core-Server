@@ -9,7 +9,13 @@ import {
 } from '../middleware/auth.js';
 import { healthCheck } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
-import { getStoreLicense, licensePayload, updateStoreLicense } from '../services/licenseService.js';
+import {
+  getStoreLicense,
+  getStoreRecord,
+  licensePayload,
+  updateStoreLicense,
+} from '../services/licenseService.js';
+import { sealAvailable, signLicense } from '../services/licenseSeal.js';
 
 const router = Router();
 
@@ -92,6 +98,37 @@ router.put('/auth/license', requireStoreIdentity, asyncHandler(async (req, res) 
     delete body[k];
   }
   ok(res, await updateStoreLicense(storePk, body));
+}));
+
+/**
+ * The SIGNED licence, for the PC that already holds this store's key.
+ *
+ * POST, not GET, for two reasons. The binding is a body of hashes rather than a
+ * lookup key, and a hardware fingerprint has no business in an access log or a
+ * proxy's URL history.
+ *
+ * `requireStoreIdentity`, not `requireStore`: an EXPIRED store must still be
+ * able to read its own licence. Gating this behind the access check would mean
+ * the one shop that most needs a fresh blob -- the one whose date the vendor has
+ * just extended -- is the one that cannot fetch it.
+ *
+ * Nothing in the body decides what the licence SAYS. It decides only which
+ * machine the answer is bound to.
+ */
+router.post('/auth/license/signed', requireStoreIdentity, asyncHandler(async (req, res) => {
+  if (req.auth.type !== 'store') throw new AppError(403, 'Store token required');
+  const storePk = req.auth.storePk || req.auth.store?.id;
+  const body = req.body || {};
+  const store = await getStoreRecord(storePk);
+  const license = licensePayload(store);
+  const signed = signLicense({
+    store,
+    license,
+    machineId: body.machine_id,
+    deviceId: body.device_id || req.auth.deviceId,
+    binding: body.hw_parts,
+  });
+  ok(res, { license, signed, seal_available: sealAvailable() });
 }));
 
 router.get('/auth/me', requireAuth(['admin', 'store']), asyncHandler(async (req, res) => {

@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,6 +159,74 @@ def ensure_store(cur, store_id: str, store_name: str | None, android_key: str | 
     )
     cur.execute("INSERT INTO store_dropdowns (store_pk) VALUES (%s) ON CONFLICT DO NOTHING", (store_pk,))
     return store_pk
+
+
+# Return lines refused by the importer, per store: {store_pk: [(collection, return_id, qty, amount)]}
+REJECTED_RETURN_LINES: dict = {}
+
+
+def importable_return_items(collection, store_pk, d):
+    """The return lines that name a medicine.
+
+    A line with medicine 0 names nothing: it cannot move stock and cannot be checked
+    against the bill. Firebase-era returns carried such blank placeholders (medicine 0,
+    qty 0, rate 0) while their refund still counted them -- store 4's SR1, SR50, SR51 and
+    PR1, PR34 arrived that way. They are left out and listed in the import report.
+    """
+    kept = []
+    for it in d.get("items") or []:
+        if safe_int((it or {}).get("medicine_id")) > 0:
+            kept.append(it)
+        else:
+            REJECTED_RETURN_LINES.setdefault(store_pk, []).append(
+                (collection, d.get("id"), safe_float((it or {}).get("qty")), safe_float((it or {}).get("amount")))
+            )
+    return kept
+
+
+def purchase_amount_paid(d):
+    """amount_paid, taken from amount_paid_at_entry when the device left it at 0.
+
+    Android keeps the money paid at entry in amount_paid_at_entry and could leave
+    amount_paid 0, so every screen reading amount_paid showed a paid bill as unpaid
+    (store 127: 79 bills, Rs 1,71,965). Dues were right either way.
+    """
+    paid = float(d.get("amount_paid") or 0)
+    entry = float(d.get("amount_paid_at_entry") or 0)
+    if paid == 0 and entry > 0:
+        return entry
+    return paid
+
+
+def run_party_cascade(store_pk) -> bool:
+    """Recompute every customer and supplier balance of one store with the server's own
+    cascade (scripts/repair_balances.mjs -> src/services/partyDueCascade.js).
+
+    The rows are copied as they were, due figures included, and nothing recomputed them:
+    imported bills kept the device's old dues until some later payment happened to
+    cascade that one party (store 127: 48 bills, Rs 4,798.57 overstated).
+    """
+    script = Path(__file__).resolve().parent / "repair_balances.mjs"
+    env = dict(os.environ)
+    env["DATABASE_URL"] = DATABASE_URL
+    try:
+        proc = subprocess.run(
+            ["node", str(script), f"--store={int(store_pk)}"],
+            cwd=str(script.parent.parent),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
+    except Exception as e:
+        print(f"  CASCADE FAIL store {store_pk}: {e}")
+        return False
+    for line in (proc.stdout or "").strip().splitlines()[-2:]:
+        print("  " + line.strip())
+    if proc.returncode != 0:
+        print(f"  CASCADE FAIL store {store_pk}: exit {proc.returncode}: {(proc.stderr or '').strip()[-400:]}")
+        return False
+    return True
 
 
 def upsert_simple(cur, table, store_pk, local_id, cols: dict):
@@ -443,7 +512,7 @@ def import_purchases(cur, store_pk, docs):
                 float(d.get("rounding") or 0),
                 float(d.get("need_to_pay") or 0),
                 float(d.get("final_amount") or 0),
-                float(d.get("amount_paid") or 0),
+                purchase_amount_paid(d),
                 float(d.get("amount_paid_at_entry") or 0),
                 float(d.get("cash_paid_at_entry") or 0),
                 float(d.get("online_paid_at_entry") or 0),
@@ -567,6 +636,8 @@ def import_supplier_payments(cur, store_pk, docs):
 def import_sales_returns(cur, store_pk, docs):
     for d in docs:
         lid = int(d["id"])
+        items = importable_return_items("sales_returns", store_pk, d)
+        dropped = len(d.get("items") or []) - len(items)
         rdate = parse_date(d.get("return_date")) or datetime.now(timezone.utc).date().isoformat()
         cur.execute(
             """
@@ -596,7 +667,7 @@ def import_sales_returns(cur, store_pk, docs):
                 float(d.get("refund_amount") or 0),
                 float(d.get("discount") or 0),
                 d.get("reason"),
-                int(d.get("item_count") or len(d.get("items") or [])),
+                len(items) if dropped else int(d.get("item_count") or len(items)),
                 parse_ts(d.get("created_at")),
                 parse_ts(d.get("updated_at")) or datetime.now(timezone.utc),
                 int(d.get("version") or 1),
@@ -607,7 +678,7 @@ def import_sales_returns(cur, store_pk, docs):
         )
         ret_pk = cur.fetchone()[0]
         cur.execute("DELETE FROM sales_return_items WHERE return_id=%s", (ret_pk,))
-        for it in d.get("items") or []:
+        for it in items:
             cur.execute(
                 """
                 INSERT INTO sales_return_items (store_pk, return_id, medicine_id, name, batch_no, qty, rate, amount)
@@ -629,6 +700,8 @@ def import_sales_returns(cur, store_pk, docs):
 def import_purchase_returns(cur, store_pk, docs):
     for d in docs:
         lid = int(d["id"])
+        items = importable_return_items("purchase_returns", store_pk, d)
+        dropped = len(d.get("items") or []) - len(items)
         rdate = parse_date(d.get("return_date")) or datetime.now(timezone.utc).date().isoformat()
         cur.execute(
             """
@@ -658,7 +731,7 @@ def import_purchase_returns(cur, store_pk, docs):
                 float(d.get("refund_amount") or 0),
                 float(d.get("discount") or 0),
                 d.get("reason"),
-                int(d.get("item_count") or len(d.get("items") or [])),
+                len(items) if dropped else int(d.get("item_count") or len(items)),
                 parse_ts(d.get("created_at")),
                 parse_ts(d.get("updated_at")) or datetime.now(timezone.utc),
                 int(d.get("version") or 1),
@@ -669,7 +742,7 @@ def import_purchase_returns(cur, store_pk, docs):
         )
         ret_pk = cur.fetchone()[0]
         cur.execute("DELETE FROM purchase_return_items WHERE return_id=%s", (ret_pk,))
-        for it in d.get("items") or []:
+        for it in items:
             cur.execute(
                 """
                 INSERT INTO purchase_return_items (store_pk, return_id, medicine_id, name, batch_no, qty, rate, amount)
@@ -800,6 +873,7 @@ def main():
 
     store_refs = [r for r in db.collection("stores").list_documents() if r.id != "_probe"]
     summary = {}
+    cascade_failures = []
 
     for sref in store_refs:
         store_id = sref.id
@@ -827,7 +901,22 @@ def main():
                 counts[col] = f"FAIL:{e}"
         import_settings(cur, store_pk, db, store_id)
         conn.commit()
-        summary[store_id] = {"store_pk": store_pk, "android_key": key_map.get(store_id), "counts": counts}
+        # Every import ends with the party cascade, so no imported bill keeps a stale due.
+        cascade_ok = run_party_cascade(store_pk)
+        if not cascade_ok:
+            cascade_failures.append(store_id)
+        rejected = REJECTED_RETURN_LINES.get(store_pk, [])
+        if rejected:
+            print(f"  refused {len(rejected)} return line(s) with medicine 0")
+        summary[store_id] = {
+            "store_pk": store_pk,
+            "android_key": key_map.get(store_id),
+            "counts": counts,
+            "party_cascade": "ok" if cascade_ok else "FAILED -- run scripts/repair_balances.mjs --store=%s" % store_pk,
+            "rejected_return_lines": [
+                {"collection": c, "return_id": rid, "qty": q, "amount": a} for (c, rid, q, a) in rejected
+            ],
+        }
 
     # deactivate demo seed stores that aren't in firebase if desired? keep them.
     cur.close()
@@ -837,6 +926,9 @@ def main():
     out.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
     print("\nWrote", out)
     print(json.dumps(summary, indent=2, default=str))
+    if cascade_failures:
+        print("Party cascade FAILED for:", ", ".join(cascade_failures))
+        sys.exit(1)
 
 
 if __name__ == "__main__":

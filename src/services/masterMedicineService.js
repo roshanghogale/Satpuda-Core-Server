@@ -262,11 +262,17 @@ export async function searchGlobalMaster({ q = '', limit = 50 } = {}) {
     return rows;
   }
 
+  // ORDER BY name COLLATE "C", not plain name. The database collation is C.UTF-8, which
+  // orders by code point exactly as "C" orders UTF-8 bytes (checked on all 390,552 live
+  // global rows: 0 positions differ), so the dropdown order is unchanged. Plain `name`
+  // let the planner walk idx_med_master_name from the top of the alphabet and filter
+  // (379,830 rows thrown away for 'z%', ~0.3-2 s); under "C" it takes the trigram index
+  // and a top-N sort instead.
   const { rows: prefix } = await query(
     `SELECT name, med_type, pack_size, manufacturer, mrp, schedule, hsn_code, gst_percent, content_drug
      FROM medicines_master
      WHERE store_pk IS NULL AND NOT deleted AND name ILIKE $1
-     ORDER BY name ASC
+     ORDER BY name COLLATE "C" ASC
      LIMIT $2`,
     [`${queryText}%`, lim],
   );

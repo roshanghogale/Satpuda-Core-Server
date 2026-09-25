@@ -5,6 +5,8 @@ import Overview from './pages/Overview.jsx';
 import Stores from './pages/Stores.jsx';
 import StoreDetail from './pages/StoreDetail.jsx';
 import MasterMedicines from './pages/MasterMedicines.jsx';
+import DemoLogins from './pages/DemoLogins.jsx';
+import Trials from './pages/Trials.jsx';
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('admin');
@@ -67,8 +69,14 @@ function Shell({ admin, onLogout, children }) {
         <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/stores">
           Stores
         </NavLink>
+        <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/trials">
+          Trials
+        </NavLink>
         <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/master-medicines">
           Master medicines
+        </NavLink>
+        <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/demo-logins">
+          Demo logins
         </NavLink>
         <div style={{ flex: 1 }} />
         <button className="btn ghost sm" onClick={onLogout}>Sign out</button>
@@ -112,7 +120,9 @@ export default function App() {
         <Route path="/" element={<Overview />} />
         <Route path="/stores" element={<Stores />} />
         <Route path="/stores/:id" element={<StoreDetail />} />
+        <Route path="/trials" element={<Trials />} />
         <Route path="/master-medicines" element={<MasterMedicines />} />
+        <Route path="/demo-logins" element={<DemoLogins />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Shell>

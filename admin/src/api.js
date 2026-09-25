@@ -1,15 +1,36 @@
 const TOKEN_KEY = 'satpuda_admin_token';
 
+// sessionStorage, not localStorage: this is the key to every shop on the
+// account, and the panel is now reachable from the public internet. Per tab,
+// gone when it closes -- so the sign-in screen is what greets you.
 export function getToken() {
-  return localStorage.getItem(TOKEN_KEY);
+  try {
+    return sessionStorage.getItem(TOKEN_KEY);
+  } catch (e) {
+    return null;
+  }
 }
 
 export function setToken(token) {
-  localStorage.setItem(TOKEN_KEY, token);
+  try {
+    sessionStorage.setItem(TOKEN_KEY, token);
+  } catch (e) {
+    /* private window: the session simply does not persist */
+  }
 }
 
 export function clearToken() {
-  localStorage.removeItem(TOKEN_KEY);
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch (e) {
+    /* nothing to clear */
+  }
+  try {
+    // Anything left over from when this was localStorage.
+    localStorage.removeItem(TOKEN_KEY);
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 export async function api(path, { method = 'GET', body, token } = {}) {

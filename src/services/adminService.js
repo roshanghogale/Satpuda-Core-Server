@@ -7,6 +7,26 @@ import {
   fyStartYearForDate,
   fyDateBounds,
 } from '../utils/fy.js';
+import {
+  dateOnly,
+  intOrNull,
+  boolOrNull,
+  textOrNull,
+  orderBy,
+  billStatus,
+  paymentModeSql,
+  stockValueSql,
+  expiryCutoffSql,
+  billGstCte,
+  SALES_SORTS,
+  PURCHASES_SORTS,
+  INVENTORY_SORTS,
+  CUSTOMER_SORTS,
+  PARTY_SORTS,
+  DOCTOR_SORTS,
+  PAYMENT_SORTS,
+  RETURN_SORTS,
+} from './adminFilters.js';
 
 /** Default Online history window = current Indian FY (01 Apr – 31 Mar), same as Offline. */
 function resolveListDates(from, to) {
@@ -17,8 +37,55 @@ function resolveListDates(from, to) {
   return { from: a, to: b, defaultFy: true };
 }
 
+/**
+ * Date window for the lists that never had one: payments and returns.
+ *
+ * Deliberately NOT resolveListDates. Those endpoints answered the whole history
+ * (newest 200) before a date filter existed here, and defaulting them to the
+ * current FY would quietly hide a shop's older payments from a panel that never
+ * asked for a window. from/to are honoured when given and ignored when not.
+ */
+function resolveOpenDates(from, to) {
+  return { from: dateOnly(from), to: dateOnly(to), defaultFy: false };
+}
+
+/**
+ * The `deleted` predicate for sales / purchases.
+ *
+ * Default is unchanged (`NOT deleted`). `status=deleted` shows only deleted
+ * rows and `include_deleted` shows both, so the owner can finally see a bill
+ * that was voided instead of having to take its absence on trust.
+ */
+function deletedPredicate({ statusDeleted, includeDeleted }) {
+  if (includeDeleted === true) return null;
+  return statusDeleted ? 'deleted' : 'NOT deleted';
+}
+
+/** A free-text ILIKE over a fixed column list; `params` is appended to in place. */
+function pushLike(params, where, q, columns) {
+  params.push(`%${q}%`);
+  const n = params.length;
+  const parts = columns.map((c) => `${c} ILIKE $${n}`);
+  return `${where} AND (${parts.join(' OR ')})`;
+}
+
 function wantExactTotal(includeTotal) {
   return !(includeTotal === false || includeTotal === '0' || includeTotal === 0);
+}
+
+/**
+ * Whether a list works out its whole-range `summary`.
+ *
+ * On unless the caller says no (include_summary=0/false/no/off). The admin panel's
+ * tiles read it and its routes pass nothing, so they keep it. The shop routes
+ * (routes/storeQuery.js) turn it off unless the shop asks: no desktop or Android
+ * build reads `summary`, and on a big store the sales one rebuilds printed GST over
+ * the whole financial year for every page a client loops through. When it is off
+ * the key is left out entirely -- never a zeroed object a client could take for a
+ * real total.
+ */
+function wantSummary(includeSummary) {
+  return boolOrNull(includeSummary) !== false;
 }
 
 async function resolveListTotal({
@@ -32,6 +99,19 @@ async function resolveListTotal({
 }) {
   // Same envelope as before: always { rows, total: int }. Skip COUNT only when
   // the page is short (total is then exact) or a new client opted out.
+  //
+  // One exception, and it used to be a lie: an EMPTY page past the end of the
+  // result set is short too, and `offset + 0` then reported the offset as the
+  // total -- offset=500 over six rows answered "total 500". A page that
+  // returned nothing at a non-zero offset knows nothing about the total, so it
+  // asks, and only a caller that opted out of the count gets the old guess.
+  if (pageLen === 0 && offset > 0 && wantExactTotal(includeTotal)) {
+    const countRes = await query(
+      `SELECT COUNT(*)::int AS n FROM ${table} WHERE ${where}`,
+      countParams,
+    );
+    return Number(countRes.rows[0].n) || 0;
+  }
   if (pageLen < limit || !wantExactTotal(includeTotal)) {
     return offset + pageLen;
   }
@@ -45,6 +125,15 @@ async function resolveListTotal({
 export async function listStores() {
   const { rows } = await query(
     `SELECT s.*,
+       -- A self-service trial is a store a STRANGER may have created, so the
+       -- list has to say so, and has to carry enough to judge it without
+       -- opening the store: who asked, from where, and how many days are left.
+       p.device_id AS trial_device_id,
+       p.ip        AS trial_ip,
+       p.created_at AS trial_created_at,
+       CASE WHEN s.expiry_enabled AND s.expiry_date IS NOT NULL
+            THEN (s.expiry_date - (NOW() AT TIME ZONE 'Asia/Kolkata')::date)
+       END AS days_left,
        (SELECT COUNT(*) FROM sales x WHERE x.store_pk=s.id AND NOT x.deleted AND NOT x.is_autosave) AS sales_count,
        (SELECT COUNT(*) FROM medicines x WHERE x.store_pk=s.id AND NOT x.deleted AND NOT x.is_hidden) AS medicine_count,
        (SELECT COALESCE(SUM(total_amount),0) FROM sales x
@@ -55,6 +144,10 @@ export async function listStores() {
             AND bill_date >= date_trunc('month', CURRENT_DATE)::date) AS month_sales,
        (SELECT COUNT(*) FROM store_devices d WHERE d.store_pk=s.id) AS device_count
      FROM stores s
+     LEFT JOIN LATERAL (
+       SELECT device_id, ip, created_at FROM store_provisions sp
+        WHERE sp.store_pk = s.id ORDER BY sp.created_at DESC LIMIT 1
+     ) p ON TRUE
      ORDER BY s.store_name`
   );
   return rows;
@@ -261,30 +354,61 @@ export async function platformOverview() {
   return { ...rows[0], stores };
 }
 
-export async function listSales(storePk, { from, to, q, schedule, medicine, batch, limit = 500, offset = 0, include_total } = {}) {
+export async function listSales(storePk, {
+  from, to, q, schedule, medicine, batch,
+  status, customer_id, party_id, sort, q_phone, include_deleted,
+  limit = 500, offset = 0, include_total, include_summary,
+} = {}) {
   const dates = resolveListDates(from, to);
+  const st = billStatus(status);
   const params = [storePk];
-  let where = 'store_pk=$1 AND NOT deleted AND NOT is_autosave';
+  const del = deletedPredicate({
+    statusDeleted: st.deleted,
+    includeDeleted: boolOrNull(include_deleted) === true,
+  });
+  let where = `store_pk=$1${del ? ` AND ${del}` : ''} AND NOT is_autosave`;
   if (dates.from) { params.push(dates.from); where += ` AND bill_date >= $${params.length}`; }
   if (dates.to) { params.push(dates.to); where += ` AND bill_date <= $${params.length}`; }
   if (q) {
-    params.push(`%${q}%`);
-    where += ` AND (bill_no ILIKE $${params.length} OR customer_name ILIKE $${params.length} OR COALESCE(doctor_name,'') ILIKE $${params.length})`;
+    // customer_phone is new here. It only ever ADDS rows -- a bill that matched
+    // before still matches -- and `q_phone=0` reproduces the pre-2026-09-16
+    // column list exactly, for a caller that wants the old result set byte for
+    // byte. Searching a shop's history by the number on the customer's phone is
+    // the whole point of the owner's "all filters" ask.
+    const cols = ['bill_no', 'customer_name', "COALESCE(doctor_name,'')"];
+    if (boolOrNull(q_phone) !== false) cols.push("COALESCE(customer_phone,'')");
+    where = pushLike(params, where, q, cols);
   }
+  if (st.sql) where += ` AND ${st.sql}`;
+  const partyId = intOrNull(customer_id ?? party_id, { min: 0 });
+  if (partyId !== null) { params.push(partyId); where += ` AND customer_id = $${params.length}`; }
   if (schedule && String(schedule).trim() && String(schedule).trim().toLowerCase() !== 'all') {
     const sch = String(schedule).trim();
     if (sch.toLowerCase() === 'non-scheduled') {
+      // COALESCE onto the medicines master, the same rule listPurchases uses.
+      // A sale line written by the Online desktop carries no schedule of its
+      // own -- save_new_sale_online never sent one -- so judging the line
+      // alone called every one of those bills "not scheduled", and answered
+      // every NAMED schedule with nothing at all. Resolving through the master
+      // fixes the bills already written, which the shop cannot re-enter.
       where += ` AND EXISTS (
-        SELECT 1 FROM sales_items si WHERE si.sale_id = sales.id
-          AND (si.schedule IS NULL OR TRIM(si.schedule) = '')
+        SELECT 1 FROM sales_items si
+          LEFT JOIN medicines m ON m.store_pk = si.store_pk AND m.local_id = si.medicine_id
+         WHERE si.sale_id = sales.id
+           AND COALESCE(NULLIF(BTRIM(si.schedule), ''), NULLIF(BTRIM(m.schedule), '')) IS NULL
       ) AND NOT EXISTS (
-        SELECT 1 FROM sales_items si2 WHERE si2.sale_id = sales.id
-          AND si2.schedule IS NOT NULL AND TRIM(si2.schedule) <> ''
+        SELECT 1 FROM sales_items si2
+          LEFT JOIN medicines m2 ON m2.store_pk = si2.store_pk AND m2.local_id = si2.medicine_id
+         WHERE si2.sale_id = sales.id
+           AND COALESCE(NULLIF(BTRIM(si2.schedule), ''), NULLIF(BTRIM(m2.schedule), '')) IS NOT NULL
       )`;
     } else {
       params.push(sch);
       where += ` AND EXISTS (
-        SELECT 1 FROM sales_items si WHERE si.sale_id = sales.id AND si.schedule = $${params.length}
+        SELECT 1 FROM sales_items si
+          LEFT JOIN medicines m ON m.store_pk = si.store_pk AND m.local_id = si.medicine_id
+         WHERE si.sale_id = sales.id
+           AND COALESCE(NULLIF(BTRIM(si.schedule), ''), BTRIM(m.schedule)) = $${params.length}
       )`;
     }
   }
@@ -308,9 +432,9 @@ export async function listSales(storePk, { from, to, q, schedule, medicine, batc
     `SELECT id AS _pk, local_id AS id, bill_no, bill_date, customer_id, customer_name, total_amount,
             amount_paid, due_amount, cash_paid, online_paid, previous_due, credit_amount,
             total_due, bill_cleared, account_cleared, discount, item_count, doctor_name,
-            fy_start_year, fy_serial, created_at
+            fy_start_year, fy_serial, created_at, deleted
      FROM sales WHERE ${where}
-     ORDER BY bill_date DESC, local_id DESC
+     ORDER BY ${orderBy(SALES_SORTS, sort, 'date_desc')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
@@ -318,10 +442,15 @@ export async function listSales(storePk, { from, to, q, schedule, medicine, batc
   const schedByPk = new Map();
   if (pks.length) {
     const { rows: sched } = await query(
-      `SELECT sale_id,
-              string_agg(DISTINCT NULLIF(TRIM(schedule), ''), ',' ORDER BY NULLIF(TRIM(schedule), '')) AS schedules
-       FROM sales_items WHERE sale_id = ANY($1::bigint[])
-       GROUP BY sale_id`,
+      // Resolved the same way the filter above resolves, or the row's Schedule
+      // chip would read blank on a bill the H1 filter had just matched.
+      `SELECT si.sale_id,
+              string_agg(DISTINCT COALESCE(NULLIF(BTRIM(si.schedule), ''), NULLIF(BTRIM(m.schedule), '')), ','
+                         ORDER BY COALESCE(NULLIF(BTRIM(si.schedule), ''), NULLIF(BTRIM(m.schedule), ''))) AS schedules
+       FROM sales_items si
+       LEFT JOIN medicines m ON m.store_pk = si.store_pk AND m.local_id = si.medicine_id
+       WHERE si.sale_id = ANY($1::bigint[])
+       GROUP BY si.sale_id`,
       [pks],
     );
     for (const r of sched) schedByPk.set(Number(r.sale_id), r.schedules);
@@ -330,22 +459,99 @@ export async function listSales(storePk, { from, to, q, schedule, medicine, batc
     ...r,
     schedules: schedByPk.get(Number(_pk)) || null,
   }));
-  const total = await resolveListTotal({
-    table: 'sales',
-    where,
-    countParams: params.slice(0, -2),
-    offset: off,
-    limit: lim,
-    pageLen: mapped.length,
-    includeTotal: include_total,
-  });
+  const filterParams = params.slice(0, -2);
+  const withSummary = wantSummary(include_summary);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'sales',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: mapped.length,
+      includeTotal: include_total,
+    }),
+    withSummary ? salesRangeSummary(where, filterParams) : null,
+  ]);
   return {
     rows: mapped,
     total,
+    ...(withSummary ? { summary } : {}),
     filter_from: dates.from,
     filter_to: dates.to,
     default_fy_applied: dates.defaultFy,
   };
+}
+
+/**
+ * Sales totals over the WHOLE filtered range, in one round trip.
+ *
+ * `where` is the same predicate the page was fetched with, so the tiles and the
+ * rows can never describe different sets of bills. Nothing here looks at the
+ * page: adding up 200 rows and calling it the year's turnover is the bug this
+ * function exists to make impossible.
+ *
+ * GST is the figure the bills PRINTED -- see billGstCte -- because that is the
+ * number the shop's returns are filed from; sales carry no GST column of their
+ * own, and Online bills written before 2026-09-13 carry no line rate either, so
+ * the rate falls back to the medicine's current one exactly as a reprint does.
+ */
+async function salesRangeSummary(where, filterParams) {
+  const { rows } = await query(
+    `WITH f AS (
+       SELECT id, local_id, total_amount, discount, amount_paid, due_amount,
+              cash_paid, online_paid, total_due
+         FROM sales WHERE ${where}
+     ),
+     ${billGstCte('f')},
+     _items AS (
+       SELECT COALESCE(SUM(si.item_discount),0)::numeric AS item_discount
+         FROM sales_items si JOIN f ON f.id = si.sale_id
+     ),
+     _ret AS (
+       SELECT COALESCE(SUM(sr.refund_amount),0)::numeric AS refunds
+         FROM sales_returns sr JOIN f ON f.local_id = sr.sale_id
+        WHERE sr.store_pk = $1 AND NOT sr.deleted
+     )
+     SELECT (SELECT COUNT(*)::int FROM f)                                  AS rows,
+            (SELECT COUNT(*)::int FROM f)                                  AS bills,
+            (SELECT COALESCE(SUM(total_amount),0)::float FROM f)           AS gross,
+            (SELECT COALESCE(SUM(discount),0)::numeric FROM f)
+              + (SELECT item_discount FROM _items)                         AS discount,
+            (SELECT COALESCE(SUM(discount),0)::float FROM f)               AS bill_discount,
+            (SELECT item_discount::float FROM _items)                      AS item_discount,
+            (SELECT tax::float FROM _gst_total)                            AS gst,
+            (SELECT taxable::float FROM _gst_total)                        AS taxable,
+            (SELECT COALESCE(SUM(amount_paid),0)::float FROM f)            AS paid,
+            (SELECT COALESCE(SUM(due_amount),0)::float FROM f)             AS due,
+            (SELECT COALESCE(SUM(cash_paid),0)::float FROM f)              AS cash,
+            (SELECT COALESCE(SUM(online_paid),0)::float FROM f)            AS online,
+            (SELECT refunds::float FROM _ret)                              AS returns`,
+    filterParams,
+  );
+  const r = rows[0] || {};
+  return {
+    rows: Number(r.rows || 0),
+    bills: Number(r.bills || 0),
+    gross: round2(r.gross),
+    discount: round2(r.discount),
+    bill_discount: round2(r.bill_discount),
+    item_discount: round2(r.item_discount),
+    gst: round2(r.gst),
+    taxable: round2(r.taxable),
+    paid: round2(r.paid),
+    due: round2(r.due),
+    cash: round2(r.cash),
+    online: round2(r.online),
+    returns: round2(r.returns),
+  };
+}
+
+/** Money out of SQL is a float; two places is what every one of these figures is. */
+function round2(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
 }
 
 export async function getSaleDetail(storePk, localId) {
@@ -359,30 +565,55 @@ export async function getSaleDetail(storePk, localId) {
   return { ...sale, id: sale.local_id, items: items.rows };
 }
 
-export async function listPurchases(storePk, { from, to, q, schedule, medicine, batch, limit = 500, offset = 0, include_total } = {}) {
+export async function listPurchases(storePk, {
+  from, to, q, schedule, medicine, batch,
+  status, supplier_id, party_id, sort, q_phone, include_deleted,
+  limit = 500, offset = 0, include_total, include_summary,
+} = {}) {
   const dates = resolveListDates(from, to);
+  const st = billStatus(status);
   const params = [storePk];
-  let where = 'store_pk=$1 AND NOT deleted AND NOT is_autosave';
+  const del = deletedPredicate({
+    statusDeleted: st.deleted,
+    includeDeleted: boolOrNull(include_deleted) === true,
+  });
+  let where = `store_pk=$1${del ? ` AND ${del}` : ''} AND NOT is_autosave`;
   if (dates.from) { params.push(dates.from); where += ` AND purchase_date >= $${params.length}`; }
   if (dates.to) { params.push(dates.to); where += ` AND purchase_date <= $${params.length}`; }
   if (q) {
-    params.push(`%${q}%`);
-    where += ` AND (purchase_no ILIKE $${params.length} OR supplier_name ILIKE $${params.length} OR bill_number ILIKE $${params.length})`;
+    // supplier_phone added for the same reason customer_phone was added to
+    // listSales, with the same `q_phone=0` way back to the old column list.
+    const cols = ['purchase_no', 'supplier_name', 'bill_number'];
+    if (boolOrNull(q_phone) !== false) cols.push("COALESCE(supplier_phone,'')");
+    where = pushLike(params, where, q, cols);
   }
+  if (st.sql) where += ` AND ${st.sql}`;
+  const partyId = intOrNull(supplier_id ?? party_id, { min: 0 });
+  if (partyId !== null) { params.push(partyId); where += ` AND supplier_id = $${params.length}`; }
   if (schedule && String(schedule).trim() && String(schedule).trim().toLowerCase() !== 'all') {
     const sch = String(schedule).trim();
     if (sch.toLowerCase() === 'non-scheduled') {
+      // COALESCE onto the medicines master: a line pushed before the desktop
+      // started sending pi.schedule has none of its own, and treating that as
+      // "not scheduled" is what made this filter answer with the whole history.
       where += ` AND EXISTS (
-        SELECT 1 FROM purchase_items pi WHERE pi.purchase_id = purchases.id
-          AND (pi.schedule IS NULL OR TRIM(pi.schedule) = '')
+        SELECT 1 FROM purchase_items pi
+          LEFT JOIN medicines m ON m.store_pk = pi.store_pk AND m.local_id = pi.medicine_id
+         WHERE pi.purchase_id = purchases.id
+           AND COALESCE(NULLIF(BTRIM(pi.schedule), ''), NULLIF(BTRIM(m.schedule), '')) IS NULL
       ) AND NOT EXISTS (
-        SELECT 1 FROM purchase_items pi2 WHERE pi2.purchase_id = purchases.id
-          AND pi2.schedule IS NOT NULL AND TRIM(pi2.schedule) <> ''
+        SELECT 1 FROM purchase_items pi2
+          LEFT JOIN medicines m2 ON m2.store_pk = pi2.store_pk AND m2.local_id = pi2.medicine_id
+         WHERE pi2.purchase_id = purchases.id
+           AND COALESCE(NULLIF(BTRIM(pi2.schedule), ''), NULLIF(BTRIM(m2.schedule), '')) IS NOT NULL
       )`;
     } else {
       params.push(sch);
       where += ` AND EXISTS (
-        SELECT 1 FROM purchase_items pi WHERE pi.purchase_id = purchases.id AND pi.schedule = $${params.length}
+        SELECT 1 FROM purchase_items pi
+          LEFT JOIN medicines m ON m.store_pk = pi.store_pk AND m.local_id = pi.medicine_id
+         WHERE pi.purchase_id = purchases.id
+           AND COALESCE(NULLIF(BTRIM(pi.schedule), ''), BTRIM(m.schedule)) = $${params.length}
       )`;
     }
   }
@@ -407,9 +638,9 @@ export async function listPurchases(storePk, { from, to, q, schedule, medicine, 
             final_amount, amount_paid, due_amount, credit_amount, total_due, bill_cleared,
             account_cleared, amount_paid_at_entry, cash_paid_at_entry, online_paid_at_entry,
             previous_due, previous_credit, overall_discount, rounding, item_count,
-            fy_start_year, fy_serial, created_at
+            fy_start_year, fy_serial, created_at, deleted
      FROM purchases WHERE ${where}
-     ORDER BY purchase_date DESC, local_id DESC
+     ORDER BY ${orderBy(PURCHASES_SORTS, sort, 'date_desc')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
@@ -442,21 +673,70 @@ export async function listPurchases(storePk, { from, to, q, schedule, medicine, 
     schedules: schedByPk.get(Number(_pk)) || null,
     returns_amount: Number(retByLocal.get(Number(r.id)) || 0),
   }));
-  const total = await resolveListTotal({
-    table: 'purchases',
-    where,
-    countParams: params.slice(0, -2),
-    offset: off,
-    limit: lim,
-    pageLen: mapped.length,
-    includeTotal: include_total,
-  });
+  const filterParams = params.slice(0, -2);
+  const withSummary = wantSummary(include_summary);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'purchases',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: mapped.length,
+      includeTotal: include_total,
+    }),
+    withSummary ? purchasesRangeSummary(where, filterParams) : null,
+  ]);
   return {
     rows: mapped,
     total,
+    ...(withSummary ? { summary } : {}),
     filter_from: dates.from,
     filter_to: dates.to,
     default_fy_applied: dates.defaultFy,
+  };
+}
+
+/**
+ * Purchase totals over the whole filtered range.
+ *
+ * Unlike a sale, a purchase carries its own tax columns (the supplier's bill
+ * said so), so `gst` here is purchases.total_gst summed -- not re-derived.
+ */
+async function purchasesRangeSummary(where, filterParams) {
+  const { rows } = await query(
+    `WITH f AS (
+       SELECT id, local_id, final_amount, total_amount, total_gst, overall_discount,
+              amount_paid, due_amount, total_due
+         FROM purchases WHERE ${where}
+     ),
+     _ret AS (
+       SELECT COALESCE(SUM(pr.refund_amount),0)::numeric AS refunds
+         FROM purchase_returns pr JOIN f ON f.local_id = pr.purchase_id
+        WHERE pr.store_pk = $1 AND NOT pr.deleted
+     )
+     SELECT (SELECT COUNT(*)::int FROM f)                             AS rows,
+            (SELECT COUNT(*)::int FROM f)                             AS bills,
+            (SELECT COALESCE(SUM(final_amount),0)::float FROM f)      AS total,
+            (SELECT COALESCE(SUM(total_amount),0)::float FROM f)      AS gross,
+            (SELECT COALESCE(SUM(total_gst),0)::float FROM f)         AS gst,
+            (SELECT COALESCE(SUM(overall_discount),0)::float FROM f)  AS discount,
+            (SELECT COALESCE(SUM(amount_paid),0)::float FROM f)       AS paid,
+            (SELECT COALESCE(SUM(due_amount),0)::float FROM f)        AS due,
+            (SELECT refunds::float FROM _ret)                         AS returns`,
+    filterParams,
+  );
+  const r = rows[0] || {};
+  return {
+    rows: Number(r.rows || 0),
+    bills: Number(r.bills || 0),
+    total: round2(r.total),
+    gross: round2(r.gross),
+    gst: round2(r.gst),
+    discount: round2(r.discount),
+    paid: round2(r.paid),
+    due: round2(r.due),
+    returns: round2(r.returns),
   };
 }
 
@@ -483,9 +763,14 @@ export async function getPurchaseDetail(storePk, localId) {
 
 export async function listInventory(storePk, {
   q, low_stock, hidden, stock, type, schedule, expiry,
-  limit = 200, offset = 0, include_total,
+  manufacturer, expiring_days, expiry_exact, sort,
+  limit = 200, offset = 0, include_total, include_summary,
 } = {}) {
   const params = [storePk];
+  // How many days "expiring soon" means, for BOTH the filter (expiry=expiring)
+  // and the summary tile. 30 is the shop's reorder horizon; expiry=near keeps
+  // its old fixed 90 so an existing caller sees no change.
+  const expDays = intOrNull(expiring_days, { min: 1, max: 3650 }) ?? 30;
   let where = 'store_pk=$1 AND NOT deleted';
   if (hidden === '1' || hidden === 'true') where += ' AND is_hidden = TRUE';
   else if (hidden !== 'all') where += ' AND NOT is_hidden';
@@ -499,6 +784,13 @@ export async function listInventory(storePk, {
   if (st === 'in' || st === 'instock' || st === 'in_stock') where += ' AND COALESCE(stock_qty,0) > 0';
   else if (st === 'out' || st === 'outofstock' || st === 'out_of_stock') where += ' AND COALESCE(stock_qty,0) <= 0';
   else if (st === 'low') where += ' AND COALESCE(stock_qty,0) > 0 AND COALESCE(stock_qty,0) <= 10';
+  // `out` has always meant "nothing to sell", which lumps a clean zero in with
+  // a negative. A negative row is a DATA problem -- stock the shop sold twice,
+  // or a purchase that never arrived -- and the owner has to be able to list
+  // exactly those, so zero and negative are now separable without changing
+  // what `out` answers.
+  else if (st === 'zero' || st === 'zero_stock') where += ' AND COALESCE(stock_qty,0) = 0';
+  else if (st === 'negative' || st === 'neg') where += ' AND COALESCE(stock_qty,0) < 0';
 
   if (type && String(type).trim() && String(type).trim().toLowerCase() !== 'all') {
     params.push(String(type).trim());
@@ -515,16 +807,37 @@ export async function listInventory(storePk, {
     }
   }
 
+  // Pharmacy expiry is written per month ("09/26") and stored on day 01, but
+  // such a batch is good until the 30th. Every tile in this product already
+  // reads it that way (storeSummaries.inventorySummary, and the desktop it
+  // mirrors); this filter did not, so the "Expired" list and the "Expired" tile
+  // disagreed by up to a month of saleable stock on the same screen. They now
+  // use one rule, and `expiry_exact=1` compares the stored date with no
+  // month-end grace for a caller that wants the old literal comparison.
+  const exactExpiry = boolOrNull(expiry_exact) === true;
+  const expCol = exactExpiry ? 'expiry_date' : expiryCutoffSql('expiry_date');
   const ex = String(expiry || '').trim().toLowerCase();
-  if (ex === 'expired') where += ' AND expiry_date IS NOT NULL AND expiry_date < CURRENT_DATE';
+  if (ex === 'expired') where += ` AND expiry_date IS NOT NULL AND ${expCol} < CURRENT_DATE`;
   else if (ex === 'near' || ex === 'nearexpiry' || ex === 'near_expiry') {
-    where += " AND expiry_date IS NOT NULL AND expiry_date >= CURRENT_DATE"
-           + " AND expiry_date <= CURRENT_DATE + INTERVAL '90 days'";
+    where += ` AND expiry_date IS NOT NULL AND ${expCol} >= CURRENT_DATE`
+           + ` AND ${expCol} <= CURRENT_DATE + INTERVAL '90 days'`;
+  } else if (ex === 'expiring' || ex === 'expiring_soon' || ex === 'expiring_in') {
+    // The caller's own horizon, and the one the summary tile counts to.
+    params.push(expDays);
+    where += ` AND expiry_date IS NOT NULL AND ${expCol} >= CURRENT_DATE`
+           + ` AND ${expCol} <= CURRENT_DATE + $${params.length}::int`;
+  } else if (ex === 'ok' || ex === 'fresh' || ex === 'not_expiring') {
+    params.push(expDays);
+    where += ` AND (expiry_date IS NULL OR ${expCol} > CURRENT_DATE + $${params.length}::int)`;
+  }
+
+  if (manufacturer && String(manufacturer).trim()) {
+    params.push(`%${String(manufacturer).trim()}%`);
+    where += ` AND COALESCE(manufacturer,'') ILIKE $${params.length}`;
   }
 
   if (q) {
-    params.push(`%${q}%`);
-    where += ` AND (name ILIKE $${params.length} OR batch_no ILIKE $${params.length} OR manufacturer ILIKE $${params.length})`;
+    where = pushLike(params, where, q, ['name', 'batch_no', 'manufacturer']);
   }
   const lim = Math.min(Number(limit) || 200, 10000);
   const off = Number(offset) || 0;
@@ -540,29 +853,128 @@ export async function listInventory(storePk, {
             -- because refetching returned a version-less row again.
             version, content_drug, client_uuid
      FROM medicines WHERE ${where}
-     ORDER BY name, batch_no
+     ORDER BY ${orderBy(INVENTORY_SORTS, sort, 'name')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
-  const total = await resolveListTotal({
-    table: 'medicines',
-    where,
-    countParams: params.slice(0, -2),
-    offset: off,
-    limit: lim,
-    pageLen: rows.length,
-    includeTotal: include_total,
-  });
-  return { rows, total };
+  const filterParams = params.slice(0, -2);
+  const withSummary = wantSummary(include_summary);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'medicines',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    withSummary ? inventoryRangeSummary(where, filterParams, expDays, expCol) : null,
+  ]);
+  return { rows, total, ...(withSummary ? { summary } : {}) };
 }
 
-export async function listCustomers(storePk, { q, dues_only, limit = 200, offset = 0, include_total } = {}) {
+/**
+ * Inventory totals over the whole filtered range.
+ *
+ * Stock value is NOT qty x mrp. A strip medicine's MRP is the price of a strip
+ * while its stock is counted in tablets, so both the retail and the cost figure
+ * divide by the tablets per strip -- see adminFilters.stockValueSql, which is a
+ * transcription of the desktop's own rule. Getting this wrong is not academic:
+ * it once put the owner's Stock Value tile Rs 609 above the desktop's on a
+ * single row.
+ *
+ * The expiry counts read a batch dated on the 1st as good to the end of that
+ * month, the same way storeSummaries.inventorySummary does, because pharmacy
+ * expiry is written per month ("09/26") and stored on day 01.
+ */
+async function inventoryRangeSummary(where, filterParams, expDays, cutoff) {
+  const params = [...filterParams, expDays];
+  const n = params.length;
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS rows,
+            COALESCE(SUM(COALESCE(stock_qty,0)),0)::float AS total_stock,
+            ROUND(COALESCE(SUM(${stockValueSql('stock_qty', 'mrp', 'type', "COALESCE(unit,'1')")}),0),2)::float
+              AS stock_value_mrp,
+            ROUND(COALESCE(SUM(${stockValueSql('stock_qty', 'rate', 'type', "COALESCE(unit,'1')")}),0),2)::float
+              AS stock_value_cost,
+            COUNT(*) FILTER (WHERE COALESCE(stock_qty,0) = 0)::int AS zero_stock_rows,
+            COUNT(*) FILTER (WHERE COALESCE(stock_qty,0) < 0)::int AS negative_stock_rows,
+            COUNT(*) FILTER (WHERE COALESCE(stock_qty,0) > 0 AND COALESCE(stock_qty,0) <= 10)::int
+              AS low_stock_rows,
+            COUNT(*) FILTER (WHERE COALESCE(stock_qty,0) > 0)::int AS in_stock_rows,
+            COUNT(*) FILTER (WHERE expiry_date IS NOT NULL AND ${cutoff} < CURRENT_DATE)::int
+              AS expired_rows,
+            COUNT(*) FILTER (WHERE expiry_date IS NOT NULL
+                               AND ${cutoff} >= CURRENT_DATE
+                               AND ${cutoff} <= CURRENT_DATE + $${n}::int)::int AS expiring_soon
+       FROM medicines WHERE ${where}`,
+    params,
+  );
+  const r = rows[0] || {};
+  return {
+    rows: Number(r.rows || 0),
+    total_stock: round2(r.total_stock),
+    stock_value_mrp: round2(r.stock_value_mrp),
+    stock_value_cost: round2(r.stock_value_cost),
+    in_stock_rows: Number(r.in_stock_rows || 0),
+    zero_stock_rows: Number(r.zero_stock_rows || 0),
+    negative_stock_rows: Number(r.negative_stock_rows || 0),
+    low_stock_rows: Number(r.low_stock_rows || 0),
+    expired_rows: Number(r.expired_rows || 0),
+    expiring_soon: Number(r.expiring_soon || 0),
+    expiring_days: expDays,
+  };
+}
+
+/**
+ * The "has due" / "has credit" pair, shared by customers and suppliers.
+ *
+ * `dues_only` is the old name and keeps working untouched; `has_due` is the
+ * same thing under the name the rest of the new filters use. `has_due=0` is
+ * the useful inverse the panel never had: the parties who are square.
+ */
+function partyBalanceWhere(where, { dues_only, has_due, has_credit }) {
+  let out = where;
+  if (dues_only) out += ' AND total_due > 0';
+  const due = boolOrNull(has_due);
+  if (due === true) out += ' AND COALESCE(total_due,0) > 0';
+  else if (due === false) out += ' AND COALESCE(total_due,0) <= 0';
+  const credit = boolOrNull(has_credit);
+  if (credit === true) out += ' AND COALESCE(total_credit,0) > 0';
+  else if (credit === false) out += ' AND COALESCE(total_credit,0) <= 0';
+  return out;
+}
+
+/** Due / credit totals over the whole filtered range of a party table. */
+async function partyRangeSummary(table, where, filterParams) {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS rows,
+            COALESCE(SUM(GREATEST(COALESCE(total_due,0),0)),0)::float AS total_due,
+            COALESCE(SUM(GREATEST(COALESCE(total_credit,0),0)),0)::float AS total_credit,
+            COUNT(*) FILTER (WHERE COALESCE(total_due,0) > 0)::int AS with_due,
+            COUNT(*) FILTER (WHERE COALESCE(total_credit,0) > 0)::int AS with_credit
+       FROM ${table} WHERE ${where}`,
+    filterParams,
+  );
+  const r = rows[0] || {};
+  return {
+    rows: Number(r.rows || 0),
+    total_due: round2(r.total_due),
+    total_credit: round2(r.total_credit),
+    with_due: Number(r.with_due || 0),
+    with_credit: Number(r.with_credit || 0),
+  };
+}
+
+export async function listCustomers(storePk, {
+  q, dues_only, has_due, has_credit, sort,
+  limit = 200, offset = 0, include_total, include_summary,
+} = {}) {
   const params = [storePk];
-  let where = 'store_pk=$1 AND NOT deleted';
-  if (dues_only) where += ' AND total_due > 0';
+  let where = partyBalanceWhere('store_pk=$1 AND NOT deleted', { dues_only, has_due, has_credit });
   if (q) {
-    params.push(`%${q}%`);
-    where += ` AND (name ILIKE $${params.length} OR phone ILIKE $${params.length} OR address ILIKE $${params.length})`;
+    where = pushLike(params, where, q, ['name', 'phone', 'address']);
   }
   const lim = Math.min(Number(limit) || 200, 10000);
   const off = Number(offset) || 0;
@@ -571,29 +983,35 @@ export async function listCustomers(storePk, { q, dues_only, limit = 200, offset
   const { rows } = await query(
     `SELECT local_id AS id, name, phone, address, total_due, total_credit, created_at
      FROM customers WHERE ${where}
-     ORDER BY name
+     ORDER BY ${orderBy(CUSTOMER_SORTS, sort, 'name')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
-  const total = await resolveListTotal({
-    table: 'customers',
-    where,
-    countParams: params.slice(0, -2),
-    offset: off,
-    limit: lim,
-    pageLen: rows.length,
-    includeTotal: include_total,
-  });
-  return { rows, total };
+  const filterParams = params.slice(0, -2);
+  const withSummary = wantSummary(include_summary);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'customers',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    withSummary ? partyRangeSummary('customers', where, filterParams) : null,
+  ]);
+  return { rows, total, ...(withSummary ? { summary } : {}) };
 }
 
-export async function listSuppliers(storePk, { q, dues_only, limit = 200, offset = 0, include_total } = {}) {
+export async function listSuppliers(storePk, {
+  q, dues_only, has_due, has_credit, sort,
+  limit = 200, offset = 0, include_total, include_summary,
+} = {}) {
   const params = [storePk];
-  let where = 'store_pk=$1 AND NOT deleted';
-  if (dues_only) where += ' AND total_due > 0';
+  let where = partyBalanceWhere('store_pk=$1 AND NOT deleted', { dues_only, has_due, has_credit });
   if (q) {
-    params.push(`%${q}%`);
-    where += ` AND (name ILIKE $${params.length} OR phone ILIKE $${params.length})`;
+    where = pushLike(params, where, q, ['name', 'phone']);
   }
   const lim = Math.min(Number(limit) || 200, 10000);
   const off = Number(offset) || 0;
@@ -602,28 +1020,34 @@ export async function listSuppliers(storePk, { q, dues_only, limit = 200, offset
   const { rows } = await query(
     `SELECT local_id AS id, name, phone, address, gstin, dl_numbers, total_due, total_credit
      FROM suppliers WHERE ${where}
-     ORDER BY name
+     ORDER BY ${orderBy(PARTY_SORTS, sort, 'name')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
-  const total = await resolveListTotal({
-    table: 'suppliers',
-    where,
-    countParams: params.slice(0, -2),
-    offset: off,
-    limit: lim,
-    pageLen: rows.length,
-    includeTotal: include_total,
-  });
-  return { rows, total };
+  const filterParams = params.slice(0, -2);
+  const withSummary = wantSummary(include_summary);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'suppliers',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    withSummary ? partyRangeSummary('suppliers', where, filterParams) : null,
+  ]);
+  return { rows, total, ...(withSummary ? { summary } : {}) };
 }
 
-export async function listDoctors(storePk, { q, limit = 200, offset = 0, include_total } = {}) {
+export async function listDoctors(storePk, {
+  q, sort, limit = 200, offset = 0, include_total, include_summary,
+} = {}) {
   const params = [storePk];
   let where = 'store_pk=$1 AND NOT deleted';
   if (q) {
-    params.push(`%${q}%`);
-    where += ` AND (name ILIKE $${params.length} OR phone ILIKE $${params.length} OR COALESCE(registration_number,'') ILIKE $${params.length})`;
+    where = pushLike(params, where, q, ['name', 'phone', "COALESCE(registration_number,'')"]);
   }
   const lim = Math.min(Number(limit) || 200, 10000);
   const off = Number(offset) || 0;
@@ -632,20 +1056,289 @@ export async function listDoctors(storePk, { q, limit = 200, offset = 0, include
   const { rows } = await query(
     `SELECT local_id AS id, name, phone, registration_number, created_at
      FROM doctors WHERE ${where}
-     ORDER BY name
+     ORDER BY ${orderBy(DOCTOR_SORTS, sort, 'name')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
-  const total = await resolveListTotal({
-    table: 'doctors',
-    where,
-    countParams: params.slice(0, -2),
-    offset: off,
-    limit: lim,
-    pageLen: rows.length,
-    includeTotal: include_total,
+  const filterParams = params.slice(0, -2);
+  const withSummary = wantSummary(include_summary);
+  const [total, counted] = await Promise.all([
+    resolveListTotal({
+      table: 'doctors',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    withSummary ? query(`SELECT COUNT(*)::int AS n FROM doctors WHERE ${where}`, filterParams) : null,
+  ]);
+  return {
+    rows,
+    total,
+    ...(withSummary ? { summary: { rows: Number(counted.rows[0]?.n || 0) } } : {}),
+  };
+}
+
+// ─── Payments and returns ─────────────────────────────────────────────────────
+// These four lists used to be inline SQL in routes/admin.js with a hard
+// LIMIT 200 and no filters at all -- the owner could see a shop's newest two
+// hundred payments and nothing else, with no way to ask "what did this customer
+// pay me in August". Defaults below are exactly that old query (no date window,
+// same order, same 200) so the panel on live keeps answering identically.
+
+export async function listCustomerPayments(storePk, {
+  from, to, q, customer_id, party_id, mode, sort,
+  limit = 200, offset = 0, include_total,
+} = {}) {
+  const dates = resolveOpenDates(from, to);
+  const params = [storePk];
+  let where = 'store_pk=$1 AND NOT deleted';
+  if (dates.from) { params.push(dates.from); where += ` AND payment_date >= $${params.length}`; }
+  if (dates.to) { params.push(dates.to); where += ` AND payment_date <= $${params.length}`; }
+  const partyId = intOrNull(customer_id ?? party_id, { min: 0 });
+  if (partyId !== null) { params.push(partyId); where += ` AND customer_id = $${params.length}`; }
+  const modeSql = paymentModeSql('payment_mode', mode, {
+    splitColumns: { cash: 'cash_amount', online: 'online_amount' },
   });
-  return { rows, total };
+  if (modeSql) where += ` AND ${modeSql}`;
+  if (textOrNull(q)) {
+    where = pushLike(params, where, String(q).trim(), [
+      "COALESCE(customer_name,'')", "COALESCE(reference_no,'')", "COALESCE(note,'')",
+    ]);
+  }
+  const lim = Math.min(Number(limit) || 200, 5000);
+  const off = Number(offset) || 0;
+  params.push(lim);
+  params.push(off);
+  const { rows } = await query(
+    `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
+            cash_amount, online_amount, reference_no, note, created_at
+     FROM customer_payments WHERE ${where}
+     ORDER BY ${orderBy(PAYMENT_SORTS, sort, 'date_desc')}
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
+  const filterParams = params.slice(0, -2);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'customer_payments',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    paymentRangeSummary('customer_payments', where, filterParams, {
+      modeColumn: 'payment_mode',
+      cashColumn: 'cash_amount',
+      onlineColumn: 'online_amount',
+    }),
+  ]);
+  return { rows, total, summary, filter_from: dates.from, filter_to: dates.to };
+}
+
+export async function listSupplierPayments(storePk, {
+  from, to, q, supplier_id, party_id, mode, sort,
+  limit = 200, offset = 0, include_total,
+} = {}) {
+  const dates = resolveOpenDates(from, to);
+  const params = [storePk];
+  let where = 'store_pk=$1 AND NOT deleted';
+  if (dates.from) { params.push(dates.from); where += ` AND payment_date >= $${params.length}`; }
+  if (dates.to) { params.push(dates.to); where += ` AND payment_date <= $${params.length}`; }
+  const partyId = intOrNull(supplier_id ?? party_id, { min: 0 });
+  if (partyId !== null) { params.push(partyId); where += ` AND supplier_id = $${params.length}`; }
+  const modeSql = paymentModeSql('mode', mode);
+  if (modeSql) where += ` AND ${modeSql}`;
+  if (textOrNull(q)) {
+    where = pushLike(params, where, String(q).trim(), [
+      'payment_no', "COALESCE(supplier_name,'')", "COALESCE(reference,'')",
+    ]);
+  }
+  const lim = Math.min(Number(limit) || 200, 5000);
+  const off = Number(offset) || 0;
+  params.push(lim);
+  params.push(off);
+  const { rows } = await query(
+    `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
+            reference, due_before, due_after, created_at
+     FROM supplier_payments WHERE ${where}
+     ORDER BY ${orderBy(PAYMENT_SORTS, sort, 'date_desc')}
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
+  const filterParams = params.slice(0, -2);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'supplier_payments',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    paymentRangeSummary('supplier_payments', where, filterParams, { modeColumn: 'mode' }),
+  ]);
+  return { rows, total, summary, filter_from: dates.from, filter_to: dates.to };
+}
+
+/**
+ * Payment totals over the whole filtered range, split by mode.
+ *
+ * customer_payments stores a cash/online split alongside the label, so its cash
+ * and online figures are those columns. supplier_payments carries only the
+ * label, so there the split is derived from it -- anything not labelled cash is
+ * counted as online, which is what the supplier ledger on the desktop does.
+ */
+async function paymentRangeSummary(table, where, filterParams, { modeColumn, cashColumn, onlineColumn }) {
+  const m = `LOWER(BTRIM(COALESCE(${modeColumn},'')))`;
+  const cash = cashColumn
+    ? `COALESCE(SUM(${cashColumn}),0)::float`
+    : `COALESCE(SUM(amount) FILTER (WHERE ${m} = 'cash'),0)::float`;
+  const online = onlineColumn
+    ? `COALESCE(SUM(${onlineColumn}),0)::float`
+    : `COALESCE(SUM(amount) FILTER (WHERE ${m} <> 'cash'),0)::float`;
+  const [totals, byMode] = await Promise.all([
+    query(
+      `SELECT COUNT(*)::int AS rows,
+              COALESCE(SUM(amount),0)::float AS amount,
+              ${cash} AS cash,
+              ${online} AS online
+         FROM ${table} WHERE ${where}`,
+      filterParams,
+    ),
+    query(
+      `SELECT ${m} AS mode, COUNT(*)::int AS count, COALESCE(SUM(amount),0)::float AS amount
+         FROM ${table} WHERE ${where}
+        GROUP BY 1 ORDER BY 3 DESC, 1`,
+      filterParams,
+    ),
+  ]);
+  const r = totals.rows[0] || {};
+  return {
+    rows: Number(r.rows || 0),
+    count: Number(r.rows || 0),
+    amount: round2(r.amount),
+    cash: round2(r.cash),
+    online: round2(r.online),
+    by_mode: byMode.rows.map((x) => ({
+      mode: x.mode || '',
+      count: Number(x.count || 0),
+      amount: round2(x.amount),
+    })),
+  };
+}
+
+export async function listSalesReturns(storePk, {
+  from, to, q, customer_id, party_id, sort,
+  limit = 200, offset = 0, include_total,
+} = {}) {
+  const dates = resolveOpenDates(from, to);
+  const params = [storePk];
+  let where = 'store_pk=$1 AND NOT deleted';
+  if (dates.from) { params.push(dates.from); where += ` AND return_date >= $${params.length}`; }
+  if (dates.to) { params.push(dates.to); where += ` AND return_date <= $${params.length}`; }
+  const partyId = intOrNull(customer_id ?? party_id, { min: 0 });
+  if (partyId !== null) { params.push(partyId); where += ` AND customer_id = $${params.length}`; }
+  if (textOrNull(q)) {
+    where = pushLike(params, where, String(q).trim(), [
+      'return_no', "COALESCE(bill_no,'')", "COALESCE(customer_name,'')", "COALESCE(reason,'')",
+    ]);
+  }
+  const lim = Math.min(Number(limit) || 200, 5000);
+  const off = Number(offset) || 0;
+  params.push(lim);
+  params.push(off);
+  const { rows } = await query(
+    `SELECT local_id AS id, return_no, sale_id, bill_no, customer_id, customer_name,
+            return_date, refund_amount, discount, reason, item_count, created_at
+     FROM sales_returns WHERE ${where}
+     ORDER BY ${orderBy(RETURN_SORTS, sort, 'date_desc')}
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
+  const filterParams = params.slice(0, -2);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'sales_returns',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    returnRangeSummary('sales_returns', where, filterParams),
+  ]);
+  return { rows, total, summary, filter_from: dates.from, filter_to: dates.to };
+}
+
+export async function listPurchaseReturns(storePk, {
+  from, to, q, supplier_id, party_id, sort,
+  limit = 200, offset = 0, include_total,
+} = {}) {
+  const dates = resolveOpenDates(from, to);
+  const params = [storePk];
+  let where = 'store_pk=$1 AND NOT deleted';
+  if (dates.from) { params.push(dates.from); where += ` AND return_date >= $${params.length}`; }
+  if (dates.to) { params.push(dates.to); where += ` AND return_date <= $${params.length}`; }
+  const partyId = intOrNull(supplier_id ?? party_id, { min: 0 });
+  if (partyId !== null) { params.push(partyId); where += ` AND supplier_id = $${params.length}`; }
+  if (textOrNull(q)) {
+    where = pushLike(params, where, String(q).trim(), [
+      'return_no', "COALESCE(purchase_no,'')", "COALESCE(supplier_name,'')", "COALESCE(reason,'')",
+    ]);
+  }
+  const lim = Math.min(Number(limit) || 200, 5000);
+  const off = Number(offset) || 0;
+  params.push(lim);
+  params.push(off);
+  const { rows } = await query(
+    `SELECT local_id AS id, return_no, purchase_id, purchase_no, supplier_id, supplier_name,
+            return_date, refund_amount, discount, reason, item_count, created_at
+     FROM purchase_returns WHERE ${where}
+     ORDER BY ${orderBy(RETURN_SORTS, sort, 'date_desc')}
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
+  const filterParams = params.slice(0, -2);
+  const [total, summary] = await Promise.all([
+    resolveListTotal({
+      table: 'purchase_returns',
+      where,
+      countParams: filterParams,
+      offset: off,
+      limit: lim,
+      pageLen: rows.length,
+      includeTotal: include_total,
+    }),
+    returnRangeSummary('purchase_returns', where, filterParams),
+  ]);
+  return { rows, total, summary, filter_from: dates.from, filter_to: dates.to };
+}
+
+/** Refund totals over the whole filtered range of a returns table. */
+async function returnRangeSummary(table, where, filterParams) {
+  const { rows } = await query(
+    `SELECT COUNT(*)::int AS rows,
+            COALESCE(SUM(refund_amount),0)::float AS refund_total,
+            COALESCE(SUM(discount),0)::float AS discount_total,
+            COALESCE(SUM(item_count),0)::int AS item_count
+       FROM ${table} WHERE ${where}`,
+    filterParams,
+  );
+  const r = rows[0] || {};
+  return {
+    rows: Number(r.rows || 0),
+    count: Number(r.rows || 0),
+    refund_total: round2(r.refund_total),
+    discount_total: round2(r.discount_total),
+    item_count: Number(r.item_count || 0),
+  };
 }
 
 export async function salesTrend(storePk, days = 30) {

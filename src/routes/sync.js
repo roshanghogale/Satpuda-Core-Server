@@ -15,6 +15,9 @@ import {
   hardDeleteDoc,
   allocateLocalIds,
 } from '../services/syncService.js';
+// Optional exports (added after the named ones above) are read off the namespace, so an
+// older syncService.js without them still links; see the by-ref route below.
+import * as syncServiceModule from '../services/syncService.js';
 import {
   getSyncStatus,
   getChanges,
@@ -131,6 +134,31 @@ router.get('/settings/shelf_settings', asyncHandler(async (req, res) => {
 router.get('/settings/kv', asyncHandler(async (req, res) => {
   ok(res, await pullCollection(await storePk(req), 'settings', { since: req.query.since }));
 }));
+
+/**
+ * One document's stock ledger, e.g. ?ref_collection=purchases&ref_id=42: the ops that
+ * purchase logged, so an edit reverses exactly those. Registered before
+ * /:collection/:localId, which would otherwise read "by-ref" as a local id.
+ *
+ * Only registered when syncService.js has fetchStockOpsByRef. A named import of it would
+ * stop the whole server from starting next to an older syncService.js (e.g. when that one
+ * file is rolled back on its own). Without it the path answers exactly as before this
+ * route existed: the /:collection/:localId handler below.
+ */
+const fetchStockOpsByRef = typeof syncServiceModule.fetchStockOpsByRef === 'function'
+  ? syncServiceModule.fetchStockOpsByRef
+  : null;
+if (fetchStockOpsByRef) {
+  router.get('/stock_operations/by-ref', asyncHandler(async (req, res) => {
+    const pk = await storePk(req);
+    ok(res, await fetchStockOpsByRef(pk, req.query.ref_collection, req.query.ref_id));
+  }));
+} else {
+  console.warn(
+    '[sync] services/syncService.js has no fetchStockOpsByRef: GET /api/sync/stock_operations/by-ref '
+    + 'is not served and answers as it did before that route existed',
+  );
+}
 
 /** Soft-delete masters; permanent hard-delete for sales/purchases */
 router.delete('/:collection/:localId', asyncHandler(async (req, res) => {

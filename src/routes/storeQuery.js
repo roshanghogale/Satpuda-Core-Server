@@ -7,6 +7,7 @@ import { asyncHandler, ok } from '../utils/http.js';
 import { requireStore, resolveStorePk } from '../middleware/auth.js';
 import * as admin from '../services/adminService.js';
 import * as summaries from '../services/storeSummaries.js';
+import { boolOrNull } from '../services/adminFilters.js';
 import { query } from '../db/pool.js';
 
 const router = Router();
@@ -44,8 +45,30 @@ async function storePk(req) {
   return resolveStorePk(req);
 }
 
+/**
+ * The shop's list options: the query as sent, with two opt-ins that default OFF here
+ * while the admin routes (routes/admin.js, same service functions) keep them ON.
+ *
+ * - q_phone: since the 2026-09-16 admin deploy the service also matches q against
+ *   customer_phone / supplier_phone. No desktop or Android build sends q_phone, so a
+ *   digits search in a shop's Sales or Purchase History suddenly returned extra bills
+ *   (test store: q=9 went from 1 bill to 3) and disagreed with /summaries/sales.
+ * - include_summary: the whole-range summary no shop client reads (see
+ *   adminService.wantSummary); off, the answer carries no `summary` key at all.
+ *
+ * Only an explicit yes (1/true/yes/on) turns either on.
+ */
+function shopListOptions(req, { phoneSearch = false } = {}) {
+  const opts = {
+    ...req.query,
+    include_summary: boolOrNull(req.query.include_summary) === true ? '1' : '0',
+  };
+  if (phoneSearch) opts.q_phone = boolOrNull(req.query.q_phone) === true ? '1' : '0';
+  return opts;
+}
+
 router.get('/sales', asyncHandler(async (req, res) => {
-  ok(res, await admin.listSales(await storePk(req), req.query));
+  ok(res, await admin.listSales(await storePk(req), shopListOptions(req, { phoneSearch: true })));
 }));
 
 router.get('/sales/:localId', asyncHandler(async (req, res) => {
@@ -54,7 +77,7 @@ router.get('/sales/:localId', asyncHandler(async (req, res) => {
 
 router.get('/purchases', asyncHandler(async (req, res) => {
   const pk = await storePk(req);
-  const base = await admin.listPurchases(pk, req.query);
+  const base = await admin.listPurchases(pk, shopListOptions(req, { phoneSearch: true }));
   // Enrich with payment fields used by client history badges
   if (base.rows?.length) {
     const ids = base.rows.map((r) => r.id).filter((n) => Number.isFinite(Number(n)));
@@ -81,20 +104,20 @@ router.get('/purchases/:localId', asyncHandler(async (req, res) => {
 }));
 
 router.get('/inventory', asyncHandler(async (req, res) => {
-  ok(res, await admin.listInventory(await storePk(req), req.query));
+  ok(res, await admin.listInventory(await storePk(req), shopListOptions(req)));
 }));
 
 /** Store parties — same rows Offline SQLite uses for Sales/Purchase dropdowns. */
 router.get('/customers', asyncHandler(async (req, res) => {
-  ok(res, await admin.listCustomers(await storePk(req), req.query));
+  ok(res, await admin.listCustomers(await storePk(req), shopListOptions(req)));
 }));
 
 router.get('/doctors', asyncHandler(async (req, res) => {
-  ok(res, await admin.listDoctors(await storePk(req), req.query));
+  ok(res, await admin.listDoctors(await storePk(req), shopListOptions(req)));
 }));
 
 router.get('/suppliers', asyncHandler(async (req, res) => {
-  ok(res, await admin.listSuppliers(await storePk(req), req.query));
+  ok(res, await admin.listSuppliers(await storePk(req), shopListOptions(req)));
 }));
 
 router.get('/payments/customers', asyncHandler(async (req, res) => {

@@ -3,6 +3,7 @@
  * Apply once per (store_pk, op_uuid); updates medicines.stock_qty by qty_delta.
  */
 import { recordAcceptedChange } from './syncRevision.js';
+import { AppError } from '../utils/http.js';
 
 function normalizeOpUuid(raw) {
   const s = String(raw || '').trim();
@@ -42,11 +43,34 @@ export async function applyStockOperation(client, storePk, doc, hint = null) {
     [storePk, opUuid],
   );
   if (existing.rows[0]) {
+    const held = existing.rows[0];
+    // One op_uuid is one stock movement, so a replay of it is skipped. A push that
+    // reuses the op_uuid for a DIFFERENT quantity is another movement under a key the
+    // server has already spent: skipping it dropped the change without a word (three
+    // purchase lines on one medicine landed as the first line alone, store 4), and
+    // applying it would double the first. Refuse it, say why, change nothing.
+    const incomingQty = Number(doc.qty_delta ?? doc.qtyDelta);
+    if (Number.isFinite(incomingQty) && incomingQty !== 0 && incomingQty !== Number(held.qty_delta)) {
+      console.warn(
+        `[stock] op ${opUuid} store=${storePk} refused: already applied with ` +
+        `qty_delta ${Number(held.qty_delta)}, pushed again with ${incomingQty}`,
+      );
+      return {
+        id: Number(held.local_id),
+        status: 'failed',
+        error:
+          `stock op ${opUuid} was already applied with qty_delta ${Number(held.qty_delta)}; ` +
+          `this push carries ${incomingQty} under the same op_uuid. Nothing was changed.`,
+        reason: 'op_uuid_qty_conflict',
+        medicine_id: Number(held.medicine_id),
+        qty_delta: Number(held.qty_delta),
+      };
+    }
     return {
-      id: Number(existing.rows[0].local_id),
+      id: Number(held.local_id),
       status: 'skipped',
-      medicine_id: Number(existing.rows[0].medicine_id),
-      qty_delta: Number(existing.rows[0].qty_delta),
+      medicine_id: Number(held.medicine_id),
+      qty_delta: Number(held.qty_delta),
     };
   }
 
@@ -83,9 +107,19 @@ export async function applyStockOperation(client, storePk, doc, hint = null) {
     [storePk, medicineId],
   );
   if (med.rows[0]) {
+    // No GREATEST(0, ...) here on purpose.
+    //
+    // "Add No Stock" sells a medicine that has not been delivered yet, and the
+    // client is built around the resulting NEGATIVE row -- it is the record of
+    // what the shop owes. Clamping the delta at zero erased that debt silently:
+    // the shortage disappeared, and when the delivery arrived its quantity was
+    // added to 0 instead of to -6, leaving MORE stock on the books than on the
+    // shelf. The clamp was never protecting against a double-applied delta
+    // either; the op_uuid check at the top of this function already makes every
+    // operation idempotent.
     await client.query(
       `UPDATE medicines
-       SET stock_qty = GREATEST(0, COALESCE(stock_qty, 0) + $3),
+       SET stock_qty = COALESCE(stock_qty, 0) + $3,
            updated_at = GREATEST(COALESCE(updated_at, NOW()), NOW()),
            version = COALESCE(version, 0) + 1,
            device_id = COALESCE($4, device_id),
@@ -152,6 +186,11 @@ export async function applyEmbeddedStockOps(client, storePk, doc, hint = null) {
       device_id: raw.device_id ?? raw.deviceId ?? doc.device_id ?? doc.deviceId,
     };
     const result = await applyStockOperation(client, storePk, opDoc, hint);
+    if (result.status === 'failed') {
+      // Thrown so the medicine document is refused whole under its savepoint: the
+      // push answer marks it failed with this message, and no half of it stays.
+      throw new AppError(409, result.error);
+    }
     if (result.status === 'applied') any = true;
   }
   return any;

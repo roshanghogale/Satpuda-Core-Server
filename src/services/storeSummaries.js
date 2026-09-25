@@ -335,9 +335,18 @@ export async function inventorySummary(storePk) {
 
     const expRaw = r.expiry_date ? String(r.expiry_date).slice(0, 10) : '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(expRaw)) {
-      const exp = new Date(`${expRaw}T12:00:00`);
-      const days = Math.round((exp - todayD) / 86400000);
-      if (days <= 0) expired += 1;
+      // Pharmacy expiry is written per month ("09/26") and stored on day 01,
+      // but such a batch is good until the 30th. Counting from day 01 marked a
+      // whole month of saleable stock as expired, and these tiles then
+      // disagreed with the rows the client rendered from the same data.
+      // A full mid-month date is honoured as given.
+      const expD = new Date(`${expRaw}T12:00:00`);
+      const cutoff =
+        expD.getDate() === 1
+          ? new Date(expD.getFullYear(), expD.getMonth() + 1, 0, 12, 0, 0)
+          : expD;
+      const days = Math.round((cutoff - todayD) / 86400000);
+      if (days < 0) expired += 1;
       else if (days <= 90) nearExpiry += 1;
     }
   }
@@ -365,7 +374,7 @@ export async function homeSummary(storePk) {
   const [fyStart, fyEnd] = fyDateBounds(fy);
   const monthStart = `${today.slice(0, 7)}-01`;
 
-  const [todayR, monthR, yearR, dues, inv] = await Promise.all([
+  const [todayR, monthR, yearR, dues, inv, payR] = await Promise.all([
     query(
       `SELECT COALESCE(SUM(total_amount),0)::float AS sales,
               COALESCE(SUM(amount_paid),0)::float AS collected,
@@ -399,12 +408,32 @@ export async function homeSummary(storePk) {
       [storePk]
     ),
     inventorySummary(storePk),
+    // Standalone receipts per window.
+    //
+    // `collected` above is SUM(sales.amount_paid) and nothing else, and this
+    // summary carried no payments field at all -- so a client could not build the
+    // figure the Offline SQL builds, and mac2's online branch fell back to
+    // max(0, collected - bill_paid), which is that number minus itself: zero, for
+    // ever, on every store. Live Roshan read FY 40,237.03 online against
+    // 64,205.71 offline on the same books.
+    query(
+      `SELECT
+         COALESCE(SUM(amount) FILTER (WHERE payment_date = $2),0)::float AS today_payments,
+         COALESCE(SUM(amount) FILTER (WHERE payment_date >= $3 AND payment_date <= $2),0)::float
+           AS month_payments,
+         COALESCE(SUM(amount) FILTER (WHERE payment_date >= $4 AND payment_date <= $5),0)::float
+           AS year_payments
+       FROM customer_payments
+       WHERE store_pk=$1 AND NOT deleted`,
+      [storePk, today, monthStart, fyStart, fyEnd]
+    ),
   ]);
 
   const t = todayR.rows[0] || {};
   const m = monthR.rows[0] || {};
   const y = yearR.rows[0] || {};
   const d = dues.rows[0] || {};
+  const p = payR.rows[0] || {};
   return {
     today: today,
     month_start: monthStart,
@@ -422,6 +451,9 @@ export async function homeSummary(storePk) {
     year_bills: Number(y.bills || 0),
     customer_due: Number(d.customer_due || 0),
     supplier_due: Number(d.supplier_due || 0),
+    today_payments: Number(p.today_payments || 0),
+    month_payments: Number(p.month_payments || 0),
+    year_payments: Number(p.year_payments || 0),
     stock_value: Number(inv.stock_value || 0),
     inventory: inv,
   };

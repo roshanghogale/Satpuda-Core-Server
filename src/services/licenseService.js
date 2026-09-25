@@ -1,8 +1,19 @@
 import { query } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
 
-/** Default online trial window after activation (IST calendar days). */
-export const DEFAULT_EXPIRY_DAYS = 10;
+/** Default online trial window after activation (IST calendar days).
+ *
+ * THE one number. Everything that grants or repairs a trial reads it from here:
+ * updateStoreLicense below (a device recording its activation date),
+ * provisionService.provisionTrial (the installer's self-service trial), and the
+ * trial_days the desktop shows the shopkeeper. Changing it changes all three.
+ *
+ * It does NOT move a store that already has an expiry_date. Every write below
+ * goes through COALESCE(expiry_date, ...), so a shop activated under the old
+ * ten-day window keeps the date it was given -- shortening the trial must never
+ * expire a shop that is already running.
+ */
+export const DEFAULT_EXPIRY_DAYS = 3;
 
 function toDateOnly(value) {
   if (value == null || value === '') return null;
@@ -74,6 +85,12 @@ export function licensePayload(store) {
     access_allowed: !access.blocked,
     access_reason: access.reason || null,
     server_date: access.today,
+    // The trial length travels WITH the licence so the desktop never has to
+    // hold its own copy of the number. A build shipped before this line simply
+    // ignores the field; a build shipped after it stops being able to disagree
+    // with the server about how long a trial is.
+    trial_days: DEFAULT_EXPIRY_DAYS,
+    is_trial: Boolean(store.provisioned_trial),
   };
 }
 
@@ -92,18 +109,38 @@ export function evaluateAccess(store, today = null) {
   return { blocked: false, reason: null, today: day };
 }
 
-export async function getStoreLicense(storePk) {
-  const { rows } = await query(
-    `SELECT id, store_id, store_key, store_name, is_active,
-            activation_date, expiry_enabled, expiry_date, apply_expiry_check
-     FROM stores WHERE id = $1`,
-    [storePk]
-  );
+/** The columns a licence is decided from, plus the row version the seal signs. */
+const LICENSE_COLS = `id, store_id, store_key, store_name, is_active,
+            activation_date, expiry_enabled, expiry_date, apply_expiry_check,
+            provisioned_trial, updated_at`;
+
+/**
+ * The raw store row behind a licence.
+ *
+ * `getStoreLicense` returns the PAYLOAD, which has already thrown away
+ * `updated_at` — and `updated_at` is the serial the signed blob carries so a
+ * stale blob loses to a fresh one. Signing needs the row, so the row is what
+ * this returns; nothing else about the read changes.
+ */
+export async function getStoreRecord(storePk) {
+  const { rows } = await query(`SELECT ${LICENSE_COLS} FROM stores WHERE id = $1`, [storePk]);
   if (!rows[0]) throw new AppError(404, 'Store not found');
-  return licensePayload(rows[0]);
+  return rows[0];
 }
 
-export async function updateStoreLicense(storePk, patch = {}) {
+export async function getStoreLicense(storePk) {
+  return licensePayload(await getStoreRecord(storePk));
+}
+
+/**
+ * The update, returning the ROW rather than the payload.
+ *
+ * The signed blob has to be made from the row (it carries `updated_at` as its
+ * serial), and it has to be made from THIS row -- the one this statement just
+ * wrote -- not from a re-read a moment later, so that the record and the blob
+ * the desktop stores can never describe two different licences.
+ */
+export async function updateStoreLicenseRow(storePk, patch = {}) {
   const fields = [];
   const vals = [];
   let i = 1;
@@ -153,14 +190,20 @@ export async function updateStoreLicense(storePk, patch = {}) {
   }
 
   if (!fields.length) {
-    return getStoreLicense(storePk);
+    // A ROW, because that is what this function promises. Returning the payload
+    // here (which is what the single-function version did) would leave the
+    // caller holding two different shapes depending on whether the patch
+    // happened to be empty, and updateStoreLicense would wrap a payload in
+    // licensePayload a second time.
+    return getStoreRecord(storePk);
   }
   fields.push('updated_at = NOW()');
   vals.push(storePk);
   const { rows } = await query(
     `UPDATE stores SET ${fields.join(', ')} WHERE id = $${i} RETURNING
        id, store_id, store_key, store_name, is_active,
-       activation_date, expiry_enabled, expiry_date, apply_expiry_check`,
+       activation_date, expiry_enabled, expiry_date, apply_expiry_check,
+       provisioned_trial, updated_at`,
     vals
   );
   if (!rows[0]) throw new AppError(404, 'Store not found');
@@ -170,14 +213,31 @@ export async function updateStoreLicense(storePk, patch = {}) {
   } catch {
     /* cache is optional */
   }
-  return licensePayload(rows[0]);
+  return rows[0];
+}
+
+export async function updateStoreLicense(storePk, patch = {}) {
+  return licensePayload(await updateStoreLicenseRow(storePk, patch));
 }
 
 /**
  * Ensure every store with an activation_date has expiry = activation + N days (IST).
  * Used by admin/ops to repair licenses after deploy.
+ *
+ * `days` is REQUIRED and has no default on purpose. It used to default to
+ * DEFAULT_EXPIRY_DAYS, which was survivable while that number was 10 and every
+ * shop had been given ten days anyway. At 3 the same call becomes a fleet-wide
+ * outage: it rewrites EVERY store with an activation_date to activation + 3, so
+ * a shop activated last month lands on an expiry date in the past and is locked
+ * out of its own till the moment somebody runs the repair helper with no
+ * argument. Whoever repairs licences has to say out loud how long a licence is.
  */
-export async function refreshExpiryFromActivation(days = DEFAULT_EXPIRY_DAYS, opts = {}) {
+export async function refreshExpiryFromActivation(days, opts = {}) {
+  const n = Number(days);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new AppError(400, 'refreshExpiryFromActivation needs an explicit positive day count');
+  }
+  days = n;
   const force = Boolean(opts.force);
   const today = istToday();
   const { rows } = await query(

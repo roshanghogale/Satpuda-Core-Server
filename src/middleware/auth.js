@@ -5,11 +5,16 @@ import { query } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
 import { hashToken } from '../utils/fy.js';
 
+// Twelve hours, not the seven days a store DEVICE gets. A shop's PC has to stay
+// paired unattended; an administrator signing in from a browser does not, and
+// this token opens every store on the account.
+const ADMIN_TOKEN_TTL = process.env.ADMIN_JWT_EXPIRES_IN || '12h';
+
 export function signAdminToken(admin) {
   return jwt.sign(
     { typ: 'admin', sub: String(admin.id), username: admin.username },
     config.jwtSecret,
-    { expiresIn: config.jwtExpiresIn }
+    { expiresIn: ADMIN_TOKEN_TTL }
   );
 }
 
@@ -72,7 +77,8 @@ const STORE_AUTH_TTL_MS = 45_000;
 const _storeAuthCache = new Map();
 
 const STORE_AUTH_COLS = `id, store_id, store_key, store_name, is_active,
-  activation_date, expiry_enabled, expiry_date, apply_expiry_check`;
+  activation_date, expiry_enabled, expiry_date, apply_expiry_check,
+  provisioned_trial`;
 
 export function invalidateStoreAuthCache(storePk = null) {
   if (storePk == null) {

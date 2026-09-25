@@ -61,9 +61,30 @@ function emitSyncHint(hint) {
   });
 }
 
-function parseTabletsPerStripe(unitStr) {
+/**
+ * A pack written as a volume or a weight -- "30ML", "15gm", "1KG", "500MG" -- is the
+ * size of one bottle, tube or tablet, never a count of tablets in a strip. Reading its
+ * digits as one turned a Tablet line typed "35GM" into 35 tablets a strip, and the next
+ * edit of that purchase took 35 times the stock back off (store 4: 17583, 17585, 17590,
+ * 17603). Same whole-string test as the clients (mac2
+ * bill_import_normalize.pack_is_volume_or_weight, Android
+ * BillImportNormalize.packIsVolumeOrWeight), widened for the run-together forms stored
+ * lines already hold ("100Mml", "1LITml", "15GRMg").
+ */
+const VOLUME_OR_WEIGHT_PACK =
+  /^\d+(?:\.\d+)?(?:m?ml|md|mg|mcg|kg|grms?|gms?|g|ltrs?|lit(?:re|er)?s?|lt|li|l)(?:ml|g)?$/i;
+
+export function packIsVolumeOrWeight(unitStr) {
+  const s = String(unitStr || '').replace(/\s+/g, '');
+  return s !== '' && VOLUME_OR_WEIGHT_PACK.test(s);
+}
+
+export function parseTabletsPerStripe(unitStr) {
   const s = String(unitStr || '').trim();
   if (!s) return 0;
+  // 0 is "not a strip count": purchaseItemPack then stores no tablets_per_stripe and
+  // the client reads the pack itself (both clients already skip volume packs).
+  if (packIsVolumeOrWeight(s)) return 0;
   const oneBy = s.match(/^1\s*[Xx×*]\s*(\d+)$/);
   if (oneBy) return Math.max(1, parseInt(oneBy[1], 10) || 0);
   const asNum = Number(s);
@@ -192,6 +213,17 @@ async function multiUpsert(client, table, columns, updateCols, rows, { batchSize
   }
 }
 
+/**
+ * created_at for a row being INSERTED: the client's, else the moment the server first
+ * saw the row. 782 store-4 rows (every purchase, every supplier payment, 393 PC sales)
+ * were stored with none, so nobody could tell when they were entered. Every ON CONFLICT
+ * branch leaves created_at out, so an existing value -- or an existing NULL -- is never
+ * overwritten through this.
+ */
+function createdAtOrNow(doc) {
+  return parseTs(doc?.created_at) || new Date();
+}
+
 async function prefetchExisting(client, table, storePk, localIds) {
   if (!localIds.length) return new Map();
   const extra = table === 'customers' ? ', phone, address' : '';
@@ -216,7 +248,7 @@ const FLAT_BULK = new Set([
   'doctors',
 ]);
 
-async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
+async function pushFlatBulk(client, storePk, collection, docs, hint = null, partyRecompute = null) {
   const localIds = docs.map((d) => localIdOf(d));
   const existingById = await prefetchExisting(client, collection, storePk, localIds);
   const results = [];
@@ -241,20 +273,20 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
         keepFilledText(doc.address, existing?.address),
         doc.document_name || null,
         Number(doc.total_due || 0), Number(doc.total_credit || 0),
-        parseTs(doc.created_at), parseTs(doc.last_updated),
+        createdAtOrNow(doc), parseTs(doc.last_updated),
         writeAt, meta.version, meta.device_id, meta.deleted, meta.sync_status,
       ]);
     } else if (collection === 'suppliers') {
       rows.push([
         storePk, localId, String(doc.name || '').toUpperCase(),
         doc.address || null, doc.phone || null, doc.gstin || null, doc.dl_numbers || null,
-        Number(doc.total_due || 0), Number(doc.total_credit || 0), parseTs(doc.created_at),
+        Number(doc.total_due || 0), Number(doc.total_credit || 0), createdAtOrNow(doc),
         writeAt, meta.version, meta.device_id, meta.deleted, meta.sync_status,
       ]);
     } else if (collection === 'doctors') {
       rows.push([
         storePk, localId, String(doc.name || '').toUpperCase(),
-        doc.phone || null, doc.registration_number || null, parseTs(doc.created_at),
+        doc.phone || null, doc.registration_number || null, createdAtOrNow(doc),
         writeAt, meta.version, meta.device_id, meta.deleted, meta.sync_status,
       ]);
     } else if (collection === 'medicines') {
@@ -265,6 +297,7 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
         doc.manufacturer || null, doc.batch_no || null,
         parseDateOnly(doc.expiry_date), doc.hsn_code || null, doc.schedule || null,
         doc.location || null, doc.content_drug || null,
+        doc.supplier_name || null,
         toBool(doc.is_hidden), parseTs(doc.synced_at), parseTs(doc.created_at),
         writeAt, meta.version, meta.device_id, meta.deleted, meta.sync_status,
       ]);
@@ -318,12 +351,13 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
     await multiUpsert(client, 'medicines', [
       'store_pk', 'local_id', 'name', 'type', 'stock_qty', 'unit', 'gst_percent', 'mrp', 'rate',
       'manufacturer', 'batch_no', 'expiry_date', 'hsn_code', 'schedule', 'location', 'content_drug',
+      'supplier_name',
       'is_hidden', 'synced_at', 'created_at',
       'updated_at', 'version', 'device_id', 'deleted', 'sync_status',
     ], [
       'name', 'type', 'stock_qty', 'unit', 'gst_percent', 'mrp', 'rate',
       'manufacturer', 'batch_no', 'expiry_date', 'hsn_code', 'schedule', 'location',
-      'content_drug', 'is_hidden', 'synced_at',
+      'content_drug', 'supplier_name', 'is_hidden', 'synced_at',
       'updated_at', 'version', 'device_id', 'deleted', 'sync_status',
     ], rows);
   } else if (collection === 'customer_payments') {
@@ -353,6 +387,21 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null) {
     hint,
     acceptedDocs.map((doc) => acceptedChangeEntry(storePk, collection, doc, 'upserted')),
   );
+
+  // The device's due/credit figures were written above only so the row exists. The
+  // balance itself belongs to the ledger: recompute it for every party this push
+  // accepted, so a stale or doubled figure from any client never stands.
+  // A bundle passes `partyRecompute` and runs this at its END instead: recomputing here
+  // re-clears the party's bills and bumps their versions BEFORE the sale or purchase
+  // edit travelling in the same bundle is applied, and that edit would then be skipped
+  // as stale.
+  if (collection === 'customers' || collection === 'suppliers') {
+    for (const doc of acceptedDocs) {
+      if (syncMeta(doc).deleted) continue;
+      if (partyRecompute) partyRecompute[collection].add(localIdOf(doc));
+      else await recomputePartyAfterPush(client, hint, storePk, collection, localIdOf(doc));
+    }
+  }
 
   const upserted = results.filter((r) => r.status === 'upserted').length;
   const skipped = results.length - upserted;
@@ -393,7 +442,7 @@ export const SPECIAL_COLLECTIONS = [
 
 // ─── Upsert helpers per collection ────────────────────────────────────────────
 
-async function upsertCustomer(client, storePk, doc) {
+async function upsertCustomer(client, storePk, doc, hint = null) {
   const localId = localIdOf(doc);
   const meta = syncMeta(doc);
   const existing = await client.query(
@@ -426,14 +475,17 @@ async function upsertCustomer(client, storePk, doc) {
       String(doc.name || '').toUpperCase(),
       phone, address, doc.document_name || null,
       Number(doc.total_due || 0), Number(doc.total_credit || 0),
-      parseTs(doc.created_at), parseTs(doc.last_updated),
+      createdAtOrNow(doc), parseTs(doc.last_updated),
       writeTimestamp(meta, prev), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
+  if (!meta.deleted) {
+    await recomputePartyAfterPush(client, hint, storePk, 'customers', localId);
+  }
   return { id: localId, status: 'upserted' };
 }
 
-async function upsertSupplier(client, storePk, doc) {
+async function upsertSupplier(client, storePk, doc, hint = null) {
   const localId = localIdOf(doc);
   const meta = syncMeta(doc);
   const existing = await client.query(
@@ -458,10 +510,13 @@ async function upsertSupplier(client, storePk, doc) {
     [
       storePk, localId, String(doc.name || '').toUpperCase(),
       doc.address || null, doc.phone || null, doc.gstin || null, doc.dl_numbers || null,
-      Number(doc.total_due || 0), Number(doc.total_credit || 0), parseTs(doc.created_at),
+      Number(doc.total_due || 0), Number(doc.total_credit || 0), createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
+  if (!meta.deleted) {
+    await recomputePartyAfterPush(client, hint, storePk, 'suppliers', localId);
+  }
   return { id: localId, status: 'upserted' };
 }
 
@@ -486,7 +541,7 @@ async function upsertDoctor(client, storePk, doc) {
        device_id=EXCLUDED.device_id, deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status`,
     [
       storePk, localId, String(doc.name || '').toUpperCase(),
-      doc.phone || null, doc.registration_number || null, parseTs(doc.created_at),
+      doc.phone || null, doc.registration_number || null, createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
@@ -494,11 +549,33 @@ async function upsertDoctor(client, storePk, doc) {
 }
 
 async function upsertMedicine(client, storePk, doc, hint = null) {
-  const { localId, clientUuid } = await resolveLocalIdByClientUuid(
-    client, 'medicines', storePk, doc,
+  // A medicine push that names its row is applied to THAT row. Both Online clients take
+  // medicine ids from /allocate-ids, so the id is the store's own. Following the
+  // client_uuid instead landed old PC pushes -- which stamp the name+batch uuid -- on
+  // whichever row already owned that uuid, usually a deleted twin: store 127's deleted
+  // 570, 627, 968 and 1128 were rewritten 472 times while the live rows the PC was
+  // editing never changed. The uuid is then not adopted (the other row keeps it), and
+  // the answer says so. A push without an id still resolves by client_uuid.
+  const { localId, clientUuid, uuidConflict } = await resolveLocalIdByClientUuid(
+    client, 'medicines', storePk, doc, { namedIdWins: true },
   );
   if (!Number.isFinite(localId) || localId <= 0) {
     throw new AppError(400, 'Document id required');
+  }
+  let answer = (r) => r;
+  if (uuidConflict) {
+    console.warn(
+      `[sync] medicines/${localId} store=${storePk} pushed with client_uuid ${uuidConflict.client_uuid} ` +
+      `held by medicines/${uuidConflict.owner_id}${uuidConflict.owner_deleted ? ' (deleted)' : ''}; ` +
+      `applied to ${localId}, uuid not adopted`,
+    );
+    const conflict = {
+      ...uuidConflict,
+      note:
+        `client_uuid belongs to medicines/${uuidConflict.owner_id}; this document was taken ` +
+        `as medicines/${localId}, the id it names, and the uuid was not adopted.`,
+    };
+    answer = (r) => ({ ...r, client_uuid_conflict: conflict });
   }
   const meta = syncMeta(doc);
   const hasStockOps = Array.isArray(doc.stock_ops || doc.stockOps)
@@ -525,17 +602,20 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
         `INSERT INTO medicines (
            store_pk, local_id, name, type, stock_qty, unit, gst_percent, mrp, rate,
            manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
+           supplier_name,
            is_hidden, synced_at, created_at,
            updated_at, version, device_id, deleted, sync_status, client_uuid
          ) VALUES (
-           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+           $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
          )
          ON CONFLICT (store_pk, local_id) DO UPDATE SET
            name=EXCLUDED.name, type=EXCLUDED.type, unit=EXCLUDED.unit,
            gst_percent=EXCLUDED.gst_percent, mrp=EXCLUDED.mrp, rate=EXCLUDED.rate,
            manufacturer=EXCLUDED.manufacturer, batch_no=EXCLUDED.batch_no, expiry_date=EXCLUDED.expiry_date,
            hsn_code=EXCLUDED.hsn_code, schedule=EXCLUDED.schedule, location=EXCLUDED.location,
-           content_drug=EXCLUDED.content_drug, is_hidden=EXCLUDED.is_hidden, synced_at=EXCLUDED.synced_at,
+           content_drug=EXCLUDED.content_drug,
+           supplier_name=COALESCE(EXCLUDED.supplier_name, medicines.supplier_name),
+           is_hidden=EXCLUDED.is_hidden, synced_at=EXCLUDED.synced_at,
            updated_at=EXCLUDED.updated_at, version=EXCLUDED.version, device_id=EXCLUDED.device_id,
            deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status,
            client_uuid=COALESCE(medicines.client_uuid, EXCLUDED.client_uuid)`,
@@ -546,6 +626,7 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
           doc.manufacturer || null, doc.batch_no || null,
           parseDateOnly(doc.expiry_date), doc.hsn_code || null, doc.schedule || null,
           doc.location || null, doc.content_drug || null,
+          doc.supplier_name || null,
           toBool(doc.is_hidden), parseTs(doc.synced_at), parseTs(doc.created_at),
           writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
           clientUuid,
@@ -554,7 +635,7 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
     }
     const applied = await applyEmbeddedStockOps(client, storePk, { ...doc, id: localId }, hint);
     await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
-    return { id: localId, status: applied || decision !== 'skip' ? 'upserted' : 'skipped' };
+    return answer({ id: localId, status: applied || decision !== 'skip' ? 'upserted' : 'skipped' });
   }
 
   // When LWW skips but stock_qty changed — e.g. an Android sale decreased stock
@@ -582,7 +663,7 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
         `incoming v${meta.version} qty=${nextQty} is older than stored qty=${prevQty}`,
       );
       await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
-      return { id: localId, status: 'skipped', reason: 'stale_stock' };
+      return answer({ id: localId, status: 'skipped', reason: 'stale_stock' });
     }
     if (existing.rows[0] && prevQty !== nextQty) {
       await client.query(
@@ -602,27 +683,30 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
         hint,
       });
       await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
-      return { id: localId, status: 'stock_patched' };
+      return answer({ id: localId, status: 'stock_patched' });
     }
     await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
-    return { id: localId, status: 'skipped' };
+    return answer({ id: localId, status: 'skipped' });
   }
 
   await client.query(
     `INSERT INTO medicines (
        store_pk, local_id, name, type, stock_qty, unit, gst_percent, mrp, rate,
        manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
+       supplier_name,
        is_hidden, synced_at, created_at,
        updated_at, version, device_id, deleted, sync_status, client_uuid
      ) VALUES (
-       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
      )
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
        name=EXCLUDED.name, type=EXCLUDED.type, stock_qty=EXCLUDED.stock_qty, unit=EXCLUDED.unit,
        gst_percent=EXCLUDED.gst_percent, mrp=EXCLUDED.mrp, rate=EXCLUDED.rate,
        manufacturer=EXCLUDED.manufacturer, batch_no=EXCLUDED.batch_no, expiry_date=EXCLUDED.expiry_date,
        hsn_code=EXCLUDED.hsn_code, schedule=EXCLUDED.schedule, location=EXCLUDED.location,
-       content_drug=EXCLUDED.content_drug, is_hidden=EXCLUDED.is_hidden, synced_at=EXCLUDED.synced_at,
+       content_drug=EXCLUDED.content_drug,
+       supplier_name=COALESCE(EXCLUDED.supplier_name, medicines.supplier_name),
+       is_hidden=EXCLUDED.is_hidden, synced_at=EXCLUDED.synced_at,
        updated_at=EXCLUDED.updated_at, version=EXCLUDED.version, device_id=EXCLUDED.device_id,
        deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status,
        client_uuid=COALESCE(medicines.client_uuid, EXCLUDED.client_uuid)`,
@@ -633,12 +717,13 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
       doc.manufacturer || null, doc.batch_no || null,
       parseDateOnly(doc.expiry_date), doc.hsn_code || null, doc.schedule || null,
       doc.location || null, doc.content_drug || null,
+      doc.supplier_name || null,
       toBool(doc.is_hidden), parseTs(doc.synced_at), parseTs(doc.created_at),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
       clientUuid,
     ]
   );
-  return { id: localId, status: 'upserted' };
+  return answer({ id: localId, status: 'upserted' });
 }
 
 async function upsertSale(client, storePk, doc, hint = null) {
@@ -653,13 +738,17 @@ async function upsertSale(client, storePk, doc, hint = null) {
     `SELECT id, version, updated_at, device_id, deleted,
             amount_paid, cash_paid, online_paid, previous_due, previous_credit,
             due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
-            total_amount, discount, discount_pct, rounding
+            total_amount, discount, discount_pct, rounding,
+            bill_no, fy_start_year, fy_serial, item_count
      FROM sales WHERE store_pk=$1 AND local_id=$2`,
     [storePk, localId]
   );
   if (shouldAcceptIncoming(existing.rows[0], { ...meta }) === 'skip') {
     await persistClientUuid(client, 'sales', storePk, localId, clientUuid);
-    return { id: localId, status: 'skipped' };
+    // A retried push is answered with the number the server HOLDS for this bill. A
+    // skip used to carry no number at all, so a retry kept whatever it had allocated
+    // for itself -- the likely way SCB1251/FY2026-27 (store 4) went unused.
+    return withStoredSaleNumber({ id: localId, status: 'skipped' }, existing.rows[0]);
   }
 
   const prev = existing.rows[0] || null;
@@ -671,8 +760,47 @@ async function upsertSale(client, storePk, doc, hint = null) {
     return fallback;
   };
 
-  const billNo = doc.bill_no || encodeSalesBillNo(doc.fy_serial || localId, doc.fy_start_year || fyStartYearForDate(doc.bill_date));
-  const fyStart = doc.fy_start_year ?? fyStartYearForDate(doc.bill_date);
+  const fyFromBillDate = fyStartYearForDate(doc.bill_date);
+  let fyStart = doc.fy_start_year ?? fyFromBillDate;
+  // An edit that leaves the number out keeps the bill's own number. It used to fall
+  // through to "no number at all" below and be handed the next free one.
+  let billNo = doc.bill_no || (prev?.bill_no ? String(prev.bill_no) : '');
+  // Same for the serial: an edit that omits fy_serial keeps the one its number carries
+  // (or the row already had) instead of writing NULL over it.
+  let saleSerial = doc.fy_serial ?? null;
+  if (saleSerial == null && billNo) {
+    const inCode = salesSerialInCode(billNo);
+    if (inCode != null && fyStartYearInCode(billNo) === Number(fyStart)) {
+      saleSerial = inCode;
+    } else if (prev && String(prev.bill_no || '') === String(billNo)) {
+      saleSerial = prev.fy_serial ?? null;
+    }
+  }
+  // Same rule as purchases: the bill's own date decides its financial year,
+  // and a missing serial is allocated rather than taken from the row id.
+  if (doc.bill_date && Number(fyStart) !== Number(fyFromBillDate)) {
+    console.warn(
+      `[fy] sale local_id=${localId} store=${storePk} claimed FY ${fyStart} ` +
+      `for date ${doc.bill_date}; refiling under FY ${fyFromBillDate}`
+    );
+    fyStart = fyFromBillDate;
+    saleSerial = await reallocateSerialForFy(client, storePk, 'sales', fyStart, localId);
+    billNo = encodeSalesBillNo(saleSerial, fyStart);
+  }
+  if (!billNo) {
+    if (!saleSerial) {
+      saleSerial = await serialWhenMissing(client, storePk, 'sales', fyStart, localId);
+    }
+    billNo = encodeSalesBillNo(saleSerial, fyStart);
+  }
+  // item_count is the number of lines the bill has. Taken from the client it drifted
+  // (10 PC bills in stores 4 and 127 disagree with their own lines), and a push without
+  // items or a count wrote 0 over a bill whose lines were kept.
+  const itemCount = Array.isArray(doc.items)
+    ? doc.items.length
+    : (doc.item_count != null && doc.item_count !== ''
+      ? (Number(doc.item_count) || 0)
+      : Number(prev?.item_count || 0));
 
   const result = await client.query(
     `INSERT INTO sales (
@@ -700,7 +828,7 @@ async function upsertSale(client, storePk, doc, hint = null) {
        updated_at=EXCLUDED.updated_at, version=EXCLUDED.version, device_id=EXCLUDED.device_id,
        deleted=EXCLUDED.deleted, sync_status=EXCLUDED.sync_status,
        client_uuid=COALESCE(sales.client_uuid, EXCLUDED.client_uuid)
-     RETURNING id`,
+     RETURNING id, bill_no, fy_start_year`,
     [
       storePk, localId, billNo, doc.customer_id ?? null, doc.bill_date,
       money('total_amount'), money('discount'), money('discount_pct'),
@@ -714,14 +842,15 @@ async function upsertSale(client, storePk, doc, hint = null) {
       Object.prototype.hasOwnProperty.call(doc, 'account_cleared')
         ? toBool(doc.account_cleared)
         : toBool(prev?.account_cleared),
-      doc.doctor_name || null, toBool(doc.is_autosave), fyStart, doc.fy_serial ?? null,
+      doc.doctor_name || null, toBool(doc.is_autosave), fyStart, saleSerial ?? null,
       doc.customer_name || null, doc.customer_phone || null, doc.customer_address || null,
-      Number(doc.item_count || (doc.items?.length || 0)), parseTs(doc.created_at),
+      itemCount, createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
       clientUuid,
     ]
   );
-  const salePk = result.rows[0].id;
+  const stored = result.rows[0];
+  const salePk = stored.id;
   if (Array.isArray(doc.items)) {
     await client.query(`DELETE FROM sales_items WHERE sale_id = $1`, [salePk]);
     const items = doc.items;
@@ -742,16 +871,26 @@ async function upsertSale(client, storePk, doc, hint = null) {
     );
   }
   // Keep FY serial table in sync for server-side allocation
-  if (fyStart && doc.fy_serial && !toBool(doc.is_autosave)) {
+  if (fyStart && saleSerial && !toBool(doc.is_autosave)) {
     await client.query(
       `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
        VALUES ($1, 'sales', $2, $3)
        ON CONFLICT (store_pk, kind, fy_start_year) DO UPDATE
          SET last_serial = GREATEST(fy_serials.last_serial, EXCLUDED.last_serial)`,
-      [storePk, fyStart, Number(doc.fy_serial)]
+      [storePk, fyStart, Number(saleSerial)]
     );
   }
   await persistClientUuid(client, 'sales', storePk, localId, clientUuid);
+  if (prev && String(prev.bill_no || '') !== String(stored.bill_no || '')) {
+    await noteNumberChange(client, storePk, {
+      action: 'sale_bill_no_changed',
+      localId,
+      from: prev.bill_no,
+      to: stored.bill_no,
+      deviceId: meta.device_id,
+      detail: { bill_date: doc.bill_date ?? null, version: meta.version },
+    });
+  }
   const customerId = Number(doc.customer_id);
   if (customerId > 0 && !toBool(doc.is_autosave)) {
     try {
@@ -761,7 +900,7 @@ async function upsertSale(client, storePk, doc, hint = null) {
       console.warn('[cascade] customer after sale:', e.message);
     }
   }
-  return { id: localId, status: 'upserted', bill_no: billNo, display_bill_no: displaySalesBillNo(billNo), fy_label: fyLabel(fyStart) };
+  return withStoredSaleNumber({ id: localId, status: 'upserted' }, stored, fyStart);
 }
 
 async function upsertPurchase(client, storePk, doc, hint = null) {
@@ -773,9 +912,16 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
     throw new AppError(400, 'Document id required');
   }
 
+  // Every header column, so an edit that leaves a field out can keep it (below).
   const loadPurchase = (id) => client.query(
     `SELECT id, version, updated_at, device_id, deleted, purchase_no,
-            fy_start_year, fy_serial, client_uuid
+            fy_start_year, fy_serial, client_uuid,
+            supplier_id, purchase_date, bill_number, subtotal, total_gst, cgst, sgst,
+            total_amount, overall_discount, rounding, need_to_pay, final_amount,
+            amount_paid, amount_paid_at_entry, cash_paid_at_entry, online_paid_at_entry,
+            previous_due, previous_credit, due, current_credit, total_due, due_amount,
+            credit_amount, paid_due, bill_cleared, account_cleared, gst_calc_method,
+            expenditure, is_autosave, supplier_name, supplier_phone, item_count
      FROM purchases WHERE store_pk=$1 AND local_id=$2`,
     [storePk, id]
   );
@@ -804,57 +950,150 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
   const meta = syncMeta(doc);
   if (shouldAcceptIncoming(existing.rows[0], { ...meta }) === 'skip') {
     await persistClientUuid(client, 'purchases', storePk, localId, clientUuid);
-    return { id: localId, status: 'skipped' };
+    // A retried push is answered with the number the store holds for this purchase.
+    return withStoredPurchaseNumber({ id: localId, status: 'skipped' }, existing.rows[0]);
   }
   const existingRow = existing.rows[0] || null;
-  const fyStart = existingRow?.fy_start_year
-    ?? doc.fy_start_year
-    ?? fyStartYearForDate(doc.purchase_date);
-  const fySerial = existingRow?.fy_serial ?? doc.fy_serial ?? null;
 
-  // Edits never change purchase_no. Putting a colliding number into INSERT
-  // VALUES still raises unique_violation even with ON CONFLICT (local_id).
-  let purchaseNo = existingRow?.purchase_no
-    ? String(existingRow.purchase_no)
-    : String(doc.purchase_no || '').trim();
-  if (!purchaseNo) {
-    purchaseNo = encodePurchaseNo(
-      fySerial || localId,
-      fyStart,
-    );
-  }
-  if (!existingRow) {
-    const clash = await client.query(
-      `SELECT 1 FROM purchases WHERE store_pk=$1 AND purchase_no=$2 LIMIT 1`,
-      [storePk, purchaseNo]
-    );
-    if (clash.rows[0]) {
-      const dataMax = await maxExistingFySerial(client, storePk, 'purchases', fyStart);
-      const { rows: ctr } = await client.query(
-        `SELECT last_serial FROM fy_serials
-         WHERE store_pk=$1 AND kind='purchases' AND fy_start_year=$2`,
-        [storePk, fyStart]
+  // A field the client left out keeps what the row holds; only a field sent with a
+  // real value is written. The UPDATE used to write Number(undefined || 0) for every
+  // missing column: the PC's supplier-payment step re-pushes purchases from a list
+  // that carries only the due fields, and on 2026-09-11 that zeroed total_amount,
+  // subtotal and total_gst on 99/FY2026-27 and 105/FY2026-27 (store 4, Rs 7,117.98).
+  // Same rule upsertSale already applies to its money fields. A new row (no
+  // existingRow) is written exactly as before.
+  const sent = (key) => Object.prototype.hasOwnProperty.call(doc, key) && doc[key] !== undefined;
+  const filled = (key) => sent(key) && doc[key] !== null && doc[key] !== '';
+  const money = (key) => {
+    if (filled(key)) return Number(doc[key]);
+    if (existingRow && existingRow[key] != null) return Number(existingRow[key]);
+    return 0;
+  };
+  const text = (key) => {
+    if (sent(key)) return doc[key] || null;
+    return existingRow ? (existingRow[key] ?? null) : null;
+  };
+  const flag = (key) => {
+    if (sent(key)) return toBool(doc[key]);
+    return existingRow ? Boolean(existingRow[key]) : false;
+  };
+  const supplierIdValue = sent('supplier_id')
+    ? (doc.supplier_id ?? null)
+    : (existingRow?.supplier_id ?? null);
+  const purchaseDate = filled('purchase_date') || !existingRow
+    ? doc.purchase_date
+    : existingRow.purchase_date;
+  const isAutosave = flag('is_autosave');
+  const itemCount = Array.isArray(doc.items)
+    ? doc.items.length
+    : (filled('item_count') ? (Number(doc.item_count) || 0) : Number(existingRow?.item_count || 0));
+
+  const fyFromDate = fyStartYearForDate(purchaseDate);
+  const dateKnown = purchaseDate != null && String(purchaseDate).trim() !== '';
+  const storedNo = existingRow ? String(existingRow.purchase_no || '').trim() : '';
+  let fyStart;
+  let fySerial;
+  let purchaseNo;
+
+  if (existingRow) {
+    // An edit keeps the store's number -- unless that number is filed under another
+    // financial year than the purchase's own date. Owner's rule (2026-09-13): the /FY
+    // tag is tested against the date on ANY edit, so a stale tag re-files. The UPDATE
+    // used to leave purchase_no alone while fy_start_year and fy_serial moved, so the
+    // store kept "5/FY2025-26" filed as serial 8 of FY2026-27 while the phone showed 8.
+    purchaseNo = storedNo;
+    const heldFy = fyStartYearInCode(storedNo);
+    if (heldFy != null) {
+      fyStart = heldFy;
+      // fy_serial always follows the number it belongs to.
+      fySerial = purchaseSerialInCode(storedNo) ?? existingRow.fy_serial ?? null;
+    } else {
+      // No /FY tag (an old PUR... or APU... number): never renumbered and never stamped
+      // with a serial. A stamped serial counts towards the year's highest live number,
+      // so the next real purchase would skip one (store 127 holds 138 such purchases).
+      fyStart = dateKnown ? fyFromDate : (existingRow.fy_start_year ?? fyFromDate);
+      fySerial = existingRow.fy_serial ?? null;
+    }
+    if (!purchaseNo) {
+      fyStart = fyFromDate;
+      fySerial = await serialWhenMissing(client, storePk, 'purchases', fyStart, localId);
+      purchaseNo = encodePurchaseNo(fySerial, fyStart);
+    } else if (
+      heldFy != null && dateKnown && heldFy !== Number(fyFromDate)
+      && !meta.deleted && !isAutosave
+    ) {
+      console.warn(
+        `[fy] purchase local_id=${localId} store=${storePk} number ${storedNo} is filed ` +
+        `under FY ${heldFy} but dated ${purchaseDate}; refiling under FY ${fyFromDate}`
       );
-      purchaseNo = encodePurchaseNo(
-        Math.max(dataMax, Number(ctr[0]?.last_serial || 0)) + 1,
-        fyStart,
+      fyStart = fyFromDate;
+      fySerial = await reallocateSerialForFy(client, storePk, 'purchases', fyStart, localId);
+      purchaseNo = encodePurchaseNo(fySerial, fyStart);
+    }
+  } else {
+    purchaseNo = String(doc.purchase_no || '').trim();
+    fyStart = Number(doc.fy_start_year) || fyFromDate;
+    fySerial = Number(doc.fy_serial) || null;
+    // The year must match the bill's own date, whatever the client claimed. A number
+    // that carries a /FY tag claims that year.
+    const claimedFy = fyStartYearInCode(purchaseNo) ?? fyStart;
+    if (doc.purchase_date && Number(claimedFy) !== Number(fyFromDate)) {
+      console.warn(
+        `[fy] purchase local_id=${localId} store=${storePk} claimed FY ${claimedFy} ` +
+        `for date ${doc.purchase_date}; refiling under FY ${fyFromDate}`
       );
+      fyStart = fyFromDate;
+      fySerial = await reallocateSerialForFy(client, storePk, 'purchases', fyStart, localId);
+      purchaseNo = encodePurchaseNo(fySerial, fyStart);
+    }
+    const inCode = purchaseSerialInCode(purchaseNo);
+    if (inCode != null && fyStartYearInCode(purchaseNo) === Number(fyStart)) {
+      // The serial is the one in the number, never a different one sent beside it.
+      fySerial = inCode;
+    } else if (!purchaseNo || !fySerial) {
+      // No number at all. Never fall back to the row's internal id.
+      if (!fySerial) {
+        fySerial = await serialWhenMissing(client, storePk, 'purchases', fyStart, localId);
+      }
+      purchaseNo = encodePurchaseNo(fySerial, fyStart);
     }
   }
 
+  // Another LIVE purchase holding this number: the client was handed a number someone
+  // else saved first. Deleted rows do not count -- uq_purchases_live_purchase_no ignores
+  // them -- and counting them made the purchase after a deleted newest one skip its
+  // number (262/FY2025-26, store 4). The next number is the year's highest LIVE number
+  // + 1 (owner's rule), and fy_serial moves with it.
+  if (purchaseNo !== storedNo && !meta.deleted
+      && await livePurchaseNoTaken(client, storePk, purchaseNo, localId)) {
+    const taken = purchaseNo;
+    await lockFySeries(client, storePk, 'purchases', fyStart);
+    let serial = (await maxExistingFySerial(client, storePk, 'purchases', Number(fyStart), localId)) + 1;
+    purchaseNo = encodePurchaseNo(serial, fyStart);
+    for (let i = 0; i < 50 && await livePurchaseNoTaken(client, storePk, purchaseNo, localId); i += 1) {
+      serial += 1;
+      purchaseNo = encodePurchaseNo(serial, fyStart);
+    }
+    fySerial = serial;
+    console.warn(
+      `[fy] purchase local_id=${localId} store=${storePk} number ${taken} is held by ` +
+      `another live purchase; stored as ${purchaseNo}`
+    );
+  }
+
   const moneyFields = [
-    doc.supplier_id ?? null, doc.purchase_date, doc.bill_number || null,
-    Number(doc.subtotal || 0), Number(doc.total_gst || 0), Number(doc.cgst || 0), Number(doc.sgst || 0),
-    Number(doc.total_amount || 0), Number(doc.overall_discount || 0), Number(doc.rounding || 0),
-    Number(doc.need_to_pay || 0), Number(doc.final_amount || 0), Number(doc.amount_paid || 0),
-    Number(doc.amount_paid_at_entry || 0), Number(doc.cash_paid_at_entry || 0),
-    Number(doc.online_paid_at_entry || 0), Number(doc.previous_due || 0), Number(doc.previous_credit || 0),
-    Number(doc.due || 0), Number(doc.current_credit || 0), Number(doc.total_due || 0),
-    Number(doc.due_amount || 0), Number(doc.credit_amount || 0), Number(doc.paid_due || 0),
-    toBool(doc.bill_cleared), toBool(doc.account_cleared), doc.gst_calc_method || null,
-    Number(doc.expenditure || 0), toBool(doc.is_autosave), fyStart, fySerial,
-    doc.supplier_name || null, doc.supplier_phone || null,
-    Number(doc.item_count || (doc.items?.length || 0)),
+    supplierIdValue, purchaseDate, text('bill_number'),
+    money('subtotal'), money('total_gst'), money('cgst'), money('sgst'),
+    money('total_amount'), money('overall_discount'), money('rounding'),
+    money('need_to_pay'), money('final_amount'), money('amount_paid'),
+    money('amount_paid_at_entry'), money('cash_paid_at_entry'),
+    money('online_paid_at_entry'), money('previous_due'), money('previous_credit'),
+    money('due'), money('current_credit'), money('total_due'),
+    money('due_amount'), money('credit_amount'), money('paid_due'),
+    flag('bill_cleared'), flag('account_cleared'), text('gst_calc_method'),
+    money('expenditure'), isAutosave, fyStart, fySerial,
+    text('supplier_name'), text('supplier_phone'),
+    itemCount,
     writeTimestamp(meta, existingRow), meta.version, meta.device_id, meta.deleted, meta.sync_status,
   ];
 
@@ -872,10 +1111,10 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
          gst_calc_method=$29, expenditure=$30, is_autosave=$31,
          fy_start_year=$32, fy_serial=$33, supplier_name=$34, supplier_phone=$35,
          item_count=$36, updated_at=$37, version=$38, device_id=$39,
-         deleted=$40, sync_status=$41
+         deleted=$40, sync_status=$41, purchase_no=$42
        WHERE store_pk=$1 AND local_id=$2
-       RETURNING id`,
-      [storePk, localId, ...moneyFields]
+       RETURNING id, purchase_no, fy_start_year`,
+      [storePk, localId, ...moneyFields, purchaseNo]
     );
   } else {
     result = await client.query(
@@ -891,14 +1130,15 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
          $21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43
        )
-       RETURNING id`,
+       RETURNING id, purchase_no, fy_start_year`,
       [
         storePk, localId, purchaseNo, ...moneyFields.slice(0, -5),
-        parseTs(doc.created_at), ...moneyFields.slice(-5),
+        createdAtOrNow(doc), ...moneyFields.slice(-5),
       ]
     );
   }
-  const purchasePk = result.rows[0].id;
+  const stored = result.rows[0];
+  const purchasePk = stored.id;
   if (Array.isArray(doc.items)) {
     await client.query(`DELETE FROM purchase_items WHERE purchase_id = $1`, [purchasePk]);
     const incomingItems = doc.items;
@@ -927,7 +1167,7 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
       })
     );
   }
-  if (!existingRow && fyStart && fySerial && !toBool(doc.is_autosave)) {
+  if (!existingRow && fyStart && fySerial && !isAutosave) {
     await client.query(
       `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
        VALUES ($1, 'purchases', $2, $3)
@@ -937,7 +1177,19 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
     );
   }
   await persistClientUuid(client, 'purchases', storePk, localId, clientUuid);
-  const supplierId = Number(doc.supplier_id);
+  const storedNow = String(stored.purchase_no || '');
+  const askedNo = String(doc.purchase_no || '').trim();
+  if (existingRow ? storedNo !== storedNow : (askedNo !== '' && askedNo !== storedNow)) {
+    await noteNumberChange(client, storePk, {
+      action: existingRow ? 'purchase_no_changed' : 'purchase_no_reassigned',
+      localId,
+      from: existingRow ? storedNo : askedNo,
+      to: storedNow,
+      deviceId: meta.device_id,
+      detail: { purchase_date: purchaseDate ?? null, version: meta.version },
+    });
+  }
+  const supplierId = Number(supplierIdValue);
   if (supplierId > 0) {
     try {
       const cascaded = await cascadeSupplierAfterLedgerChange(client, storePk, supplierId, hint);
@@ -946,11 +1198,31 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
       console.warn('[cascade] supplier after purchase:', e.message);
     }
   }
-  return { id: localId, status: 'upserted', purchase_no: purchaseNo, display_purchase_no: displayPurchaseNo(purchaseNo), fy_label: fyLabel(fyStart) };
+  return withStoredPurchaseNumber({ id: localId, status: 'upserted' }, stored, fyStart);
+}
+
+/** Turn a temporary id into a real one before a payment is stored.
+ *
+ *  A client that cannot reach the id allocator stamps a temporary NEGATIVE id
+ *  on the record so it can queue. If that id is stored as the payment's
+ *  permanent local_id the shop can never delete the payment again -- the app
+ *  looks it up and reports "payment not found". Ten payments were stranded that
+ *  way in one store, including an accidental duplicate that left the supplier's
+ *  due short by its own amount.
+ */
+async function realPaymentLocalId(client, storePk, table, localId) {
+  if (Number(localId) > 0) return Number(localId);
+  const { rows } = await client.query(
+    `SELECT COALESCE(MAX(local_id),0) AS mx FROM ${table} WHERE store_pk=$1 AND local_id > 0`,
+    [storePk]
+  );
+  const next = Math.max(1, Number(rows[0].mx) + 1);
+  console.warn(`[ids] ${table} arrived with temporary id ${localId}; stored as ${next}`);
+  return next;
 }
 
 async function upsertCustomerPayment(client, storePk, doc, hint = null) {
-  const localId = localIdOf(doc);
+  const localId = await realPaymentLocalId(client, storePk, 'customer_payments', localIdOf(doc));
   const meta = syncMeta(doc);
   const existing = await client.query(
     `SELECT version, updated_at, device_id, deleted FROM customer_payments WHERE store_pk=$1 AND local_id=$2`,
@@ -974,7 +1246,7 @@ async function upsertCustomerPayment(client, storePk, doc, hint = null) {
       storePk, localId, Number(doc.customer_id), doc.customer_name || null, doc.payment_date,
       Number(doc.amount || 0), doc.payment_mode || 'cash',
       Number(doc.cash_amount || 0), Number(doc.online_amount || 0),
-      doc.reference_no || null, doc.note || null, parseTs(doc.created_at),
+      doc.reference_no || null, doc.note || null, createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
@@ -991,7 +1263,7 @@ async function upsertCustomerPayment(client, storePk, doc, hint = null) {
 }
 
 async function upsertSupplierPayment(client, storePk, doc, hint = null) {
-  const localId = localIdOf(doc);
+  const localId = await realPaymentLocalId(client, storePk, 'supplier_payments', localIdOf(doc));
   const meta = syncMeta(doc);
   const existing = await client.query(
     `SELECT version, updated_at, device_id, deleted FROM supplier_payments WHERE store_pk=$1 AND local_id=$2`,
@@ -1014,7 +1286,7 @@ async function upsertSupplierPayment(client, storePk, doc, hint = null) {
     [
       storePk, localId, paymentNo, Number(doc.supplier_id), doc.supplier_name || null, doc.payment_date,
       Number(doc.amount || 0), doc.mode || 'Cash', doc.reference || null,
-      Number(doc.due_before || 0), Number(doc.due_after || 0), parseTs(doc.created_at),
+      Number(doc.due_before || 0), Number(doc.due_after || 0), createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
@@ -1050,11 +1322,14 @@ async function upsertSupplierPayment(client, storePk, doc, hint = null) {
  * never learn the bills were cleared — the party total moves but the individual bills
  * stay "unpaid" on every other device. That is the "payment not clearing all bills" bug.
  */
-async function noteCascadeChanges(client, hint, storePk, partyCollection, partyLocalId, billCollection, cascaded) {
+async function noteCascadeChanges(
+  client, hint, storePk, partyCollection, partyLocalId, billCollection, cascaded,
+  { includeParty = true } = {},
+) {
   if (!hint) return;
   const entries = [];
   const pid = Number(partyLocalId);
-  if (pid > 0) {
+  if (pid > 0 && includeParty) {
     entries.push(acceptedChangeEntry(storePk, partyCollection, { id: pid, local_id: pid }, 'upserted', { localId: pid }));
   }
   for (const lid of cascaded?.dirtyLocalIds || []) {
@@ -1063,6 +1338,45 @@ async function noteCascadeChanges(client, hint, storePk, partyCollection, partyL
     entries.push(acceptedChangeEntry(storePk, billCollection, { id: v, local_id: v }, 'upserted', { localId: v }));
   }
   await noteAcceptedChangeMany(client, hint, entries);
+}
+
+/**
+ * A pushed customer's or supplier's due and credit are the ledger's, not the device's.
+ *
+ * upsertCustomer / upsertSupplier (and the bulk path) stored whatever total the device
+ * sent. A device that rebuilt the figure from a stale catalogue, or replayed a queued
+ * push, overwrote a correct balance: store 127 had customers owing Rs 809 that exists
+ * only on abandoned drafts, and the PC queue replay doubled a customer's due.
+ *
+ * The device's figure is still written first (so the row exists and old clients keep
+ * working), then the party cascade recomputes it from bills, payments and returns and
+ * clears the bills FIFO. The party row is rewritten -- new version, updated_at NOW()
+ * -- only when the device's figure was wrong, so that device pulls the real one next
+ * time and a device that was right is not made to re-pull. Its own savepoint: a
+ * failure here leaves the push exactly as it was before this existed.
+ */
+async function recomputePartyAfterPush(client, hint, storePk, collection, localId) {
+  const pid = Number(localId);
+  if (!(pid > 0)) return null;
+  const isSupplier = collection === 'suppliers';
+  const sp = `sp_party_${++_spSeq}`;
+  await client.query(`SAVEPOINT ${sp}`);
+  try {
+    const cascaded = isSupplier
+      ? await cascadeSupplierAfterLedgerChange(client, storePk, pid, hint, { onlyIfChanged: true })
+      : await cascadeCustomerAfterLedgerChange(client, storePk, pid, hint, { onlyIfChanged: true });
+    await noteCascadeChanges(
+      client, hint, storePk, collection, pid, isSupplier ? 'purchases' : 'sales', cascaded,
+      { includeParty: Boolean(cascaded?.partyUpdated) },
+    );
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+    return cascaded;
+  } catch (e) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+    console.warn(`[cascade] ${collection}/${pid} after push:`, e.message);
+    return null;
+  }
 }
 
 /**
@@ -1095,6 +1409,17 @@ async function cascadeAfterPurchaseReturn(client, storePk, doc, hint) {
 let _spSeq = 0;
 
 /**
+ * The Postgres SQLSTATE of a failed document (40P01 deadlock, 55P03 lock timeout,
+ * 57014 cancel, 23505 unique...), so a client can tell a temporary refusal from a
+ * permanent one without reading the message. null when the failure is not a Postgres
+ * error (a refused document, a stock-op conflict).
+ */
+function sqlStateOf(err) {
+  const c = err?.code;
+  return typeof c === 'string' && /^[0-9A-Z]{5}$/.test(c) ? c : null;
+}
+
+/**
  * Run one document's upsert inside a SAVEPOINT so a bad row cannot destroy the batch.
  *
  * pushBundle wraps the entire push in one transaction. Before this, ONE malformed
@@ -1122,7 +1447,10 @@ async function applyIsolated(client, collection, doc, run) {
       `[sync] ${collection}/${localId ?? '?'} rejected, batch continues:`,
       err.message,
     );
-    return { id: localId, status: 'failed', error: err.message, constraint: err.constraint || null };
+    return {
+      id: localId, status: 'failed', error: err.message, constraint: err.constraint || null,
+      code: sqlStateOf(err),
+    };
   }
 }
 
@@ -1168,7 +1496,7 @@ async function upsertSalesReturn(client, storePk, doc, hint = null) {
       doc.customer_id ?? null, doc.customer_name || null,
       requiredDate(doc.return_date, doc.created_at),
       Number(doc.refund_amount || 0), Number(doc.discount || 0), doc.reason || null,
-      Number(doc.item_count || (doc.items?.length || 0)), parseTs(doc.created_at),
+      Number(doc.item_count || (doc.items?.length || 0)), createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
@@ -1218,7 +1546,7 @@ async function upsertPurchaseReturn(client, storePk, doc, hint = null) {
       doc.supplier_id ?? null, doc.supplier_name || null,
       requiredDate(doc.return_date, doc.created_at),
       Number(doc.refund_amount || 0), Number(doc.discount || 0), doc.reason || null,
-      Number(doc.item_count || (doc.items?.length || 0)), parseTs(doc.created_at),
+      Number(doc.item_count || (doc.items?.length || 0)), createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
@@ -1269,13 +1597,15 @@ export async function pushDocs(storePk, collection, docs) {
       const results = [];
       let upserted = 0;
       let skipped = 0;
+      let failed = 0;
       for (const doc of docs) {
         const r = await applyStockOperation(client, storePk, doc, hint);
-        results.push(r);
+        results.push(r.status === 'failed' ? { ...r, code: r.code ?? null } : r);
         if (r.status === 'applied') upserted++;
+        else if (r.status === 'failed') failed++;
         else skipped++;
       }
-      return { results, upserted, skipped };
+      return { results, upserted, skipped, failed };
     });
     emitSyncHint(hint);
     return { ...out, revisions: hint.revisions.slice() };
@@ -1364,6 +1694,7 @@ export async function pushBundle(storePk, bundle) {
   await withTransaction(async (client) => {
     await ensureStoreSyncState(client, storePk);
     const deferredChanges = [];
+    const partyRecompute = { customers: new Set(), suppliers: new Set() };
     for (const col of order) {
       const docs = bundle[col];
       if (!docs?.length) continue;
@@ -1371,17 +1702,19 @@ export async function pushBundle(storePk, bundle) {
         const results = [];
         let upserted = 0;
         let skipped = 0;
+        let failed = 0;
         for (const doc of docs) {
           const r = await applyStockOperation(client, storePk, doc, hint);
-          results.push(r);
+          results.push(r.status === 'failed' ? { ...r, code: r.code ?? null } : r);
           if (r.status === 'applied') upserted++;
+          else if (r.status === 'failed') failed++;
           else skipped++;
         }
-        summary[col] = { results, upserted, skipped };
+        summary[col] = { results, upserted, skipped, failed };
         continue;
       }
       if (FLAT_BULK.has(col)) {
-        summary[col] = await pushFlatBulk(client, storePk, col, docs, hint);
+        summary[col] = await pushFlatBulk(client, storePk, col, docs, hint, partyRecompute);
         continue;
       }
       const fn = UPSERT_MAP[col];
@@ -1404,6 +1737,13 @@ export async function pushBundle(storePk, bundle) {
         }
       }
       summary[col] = { upserted, skipped, failed, results };
+    }
+    // Customers and suppliers pushed in this bundle, recomputed from the ledger now that
+    // every bill, payment and return in it has been applied.
+    for (const partyCollection of ['customers', 'suppliers']) {
+      for (const partyId of partyRecompute[partyCollection]) {
+        await recomputePartyAfterPush(client, hint, storePk, partyCollection, partyId);
+      }
     }
     if (bundle.pharmacy_profile) {
       const pr = await upsertPharmacyProfile(client, storePk, bundle.pharmacy_profile);
@@ -1476,6 +1816,41 @@ export async function softDeleteDoc(storePk, collection, localId, deviceId = nul
       [storePk, Number(localId), deviceId]
     );
     if (!rowCount) throw new AppError(404, 'Document not found');
+
+    // Whatever this document was, the party's account has just changed. The
+    // cascade recomputes total_due AND the per-bill account_cleared /
+    // bill_cleared flags -- it ran on every upsert but never on a delete, so
+    // removing the payment that had cleared a bill left that bill still marked
+    // "Cleared" with no due against it.
+    const PARTY_OF = {
+      supplier_payments: ['suppliers', 'supplier_id'],
+      purchases: ['suppliers', 'supplier_id'],
+      purchase_returns: ['suppliers', 'supplier_id'],
+      customer_payments: ['customers', 'customer_id'],
+      sales: ['customers', 'customer_id'],
+      sales_returns: ['customers', 'customer_id'],
+    };
+    const party = PARTY_OF[collection];
+    if (party) {
+      const [partyTable, fk] = party;
+      try {
+        const { rows: owner } = await client.query(
+          `SELECT ${fk} AS pid FROM ${collection}
+            WHERE store_pk = $1 AND local_id = $2 LIMIT 1`,
+          [storePk, Number(localId)],
+        );
+        const pid = Number((owner[0] || {}).pid || 0);
+        if (pid > 0) {
+          const cascaded = partyTable === 'suppliers'
+            ? await cascadeSupplierAfterLedgerChange(client, storePk, pid, hint)
+            : await cascadeCustomerAfterLedgerChange(client, storePk, pid, hint);
+          await noteCascadeChanges(client, hint, storePk, partyTable, pid, collection, cascaded);
+        }
+      } catch (e) {
+        console.warn(`[cascade] ${partyTable} after ${collection} delete:`, e.message);
+      }
+    }
+
     await noteAcceptedChange(client, hint, storePk, collection, null, 'soft_deleted', {
       localId: Number(localId),
       entityVersion: Number(rows[0].version),
@@ -1506,7 +1881,7 @@ export async function hardDeleteDoc(storePk, collection, localId, deviceId = nul
     await ensureStoreSyncState(client, storePk);
     if (collection === 'sales') {
       const { rows: sales } = await client.query(
-        `SELECT id, version, fy_start_year, bill_date FROM sales
+        `SELECT id, version, fy_start_year, bill_date, customer_id FROM sales
          WHERE store_pk=$1 AND local_id=$2 LIMIT 1`,
         [storePk, lid],
       );
@@ -1521,9 +1896,20 @@ export async function hardDeleteDoc(storePk, collection, localId, deviceId = nul
       const salePk = sales[0].id;
       const prevVer = Number(sales[0].version || 1);
       const saleFy = sales[0].fy_start_year || fyStartYearForDate(sales[0].bill_date);
+      const saleCustomerId = Number(sales[0].customer_id || 0);
       await client.query(`DELETE FROM sales_items WHERE sale_id=$1`, [salePk]);
       await client.query(`DELETE FROM sales WHERE id=$1`, [salePk]);
       await rewindFySerialCounter(client, storePk, 'sales', saleFy);
+      // Same gap as purchases: the balance cascade ran on upsert but never on a
+      // delete, so a removed bill kept counting towards the customer's due.
+      if (saleCustomerId > 0) {
+        try {
+          const cascaded = await cascadeCustomerAfterLedgerChange(client, storePk, saleCustomerId, hint);
+          await noteCascadeChanges(client, hint, storePk, 'customers', saleCustomerId, 'sales', cascaded);
+        } catch (e) {
+          console.warn('[cascade] customer after sale delete:', e.message);
+        }
+      }
       await noteAcceptedChange(client, hint, storePk, 'sales', null, 'hard_deleted', {
         localId: lid,
         entityVersion: prevVer + 1_000_000,
@@ -1533,7 +1919,7 @@ export async function hardDeleteDoc(storePk, collection, localId, deviceId = nul
     }
 
     const { rows: purchases } = await client.query(
-      `SELECT id, version, fy_start_year, purchase_date FROM purchases
+      `SELECT id, version, fy_start_year, purchase_date, supplier_id FROM purchases
        WHERE store_pk=$1 AND local_id=$2 LIMIT 1`,
       [storePk, lid],
     );
@@ -1549,32 +1935,81 @@ export async function hardDeleteDoc(storePk, collection, localId, deviceId = nul
     const prevPurVer = Number(purchases[0].version || 1);
     const purchaseFy = purchases[0].fy_start_year
       || fyStartYearForDate(purchases[0].purchase_date);
-    const { rows: pItems } = await client.query(
-      `SELECT medicine_id FROM purchase_items WHERE purchase_id=$1`,
-      [purchasePk],
+    // Delete means delete. Refuse in one case only: goods that came in on THIS
+    // bill have since been sold, so removing it would leave those sales with no
+    // purchase behind them. When that happens, name the sales so the shop can
+    // act instead of being told "no".
+    //
+    // The previous guard compared the quantity this bill added against the
+    // stock on hand and refused whenever the shelf was short. That refused far
+    // too much: stock runs down in the ordinary course of trade, and a bill
+    // typed wrong could then never be removed. Offline has always allowed the
+    // delete and let stock go negative -- the honest record of goods sold that
+    // the shop can no longer account for -- so refusing here also made the two
+    // modes disagree, and the client retried the refusal forever while the shop
+    // was told the bill had gone and went on seeing its supplier due.
+    const { rows: soldFromThis } = await client.query(
+      `SELECT s.local_id            AS sale_local_id,
+              COALESCE(s.bill_no,'')  AS bill_no,
+              s.bill_date           AS sale_date,
+              COALESCE(m.name,'')   AS medicine_name,
+              SUM(COALESCE(si.qty,0))::float AS qty_sold
+         FROM purchase_items pi
+         JOIN sales_items si
+              ON si.store_pk = pi.store_pk
+             AND si.medicine_id = pi.medicine_id
+         JOIN sales s
+              ON s.id = si.sale_id
+             AND s.store_pk = si.store_pk
+             AND COALESCE(s.deleted, FALSE) = FALSE
+         LEFT JOIN medicines m
+              ON m.store_pk = pi.store_pk AND m.local_id = pi.medicine_id
+        WHERE pi.purchase_id = $1
+          AND pi.store_pk = $2
+          AND s.bill_date >= COALESCE($3, s.bill_date)
+        GROUP BY s.local_id, s.bill_no, s.bill_date, m.name
+        ORDER BY s.bill_date DESC, s.local_id DESC
+        LIMIT 25`,
+      [purchasePk, storePk, purchases[0].purchase_date || null],
     );
-    const medIds = [...new Set(pItems.map((r) => Number(r.medicine_id || 0)).filter((n) => n > 0))];
-    if (medIds.length) {
-      const { rows: sold } = await client.query(
-        `SELECT 1
-         FROM sales_items si
-         JOIN sales s ON s.id = si.sale_id AND s.store_pk = si.store_pk
-         WHERE si.store_pk = $1
-           AND si.medicine_id = ANY($2::bigint[])
-           AND COALESCE(s.deleted, FALSE) = FALSE
-         LIMIT 1`,
-        [storePk, medIds],
+    if (soldFromThis.length) {
+      const listed = soldFromThis
+        .slice(0, 8)
+        .map((r) => `${r.bill_no || ('#' + r.sale_local_id)} (${r.medicine_name || 'item'} x${Number(r.qty_sold || 0)})`)
+        .join(', ');
+      const more = soldFromThis.length > 8 ? ` and ${soldFromThis.length - 8} more` : '';
+      const err = new AppError(
+        409,
+        'Cannot delete this purchase - medicines from it have been sold on: '
+        + `${listed}${more}. Delete or return those sales first.`,
       );
-      if (sold.length) {
-        throw new AppError(
-          409,
-          'Cannot delete purchase — one or more items from this purchase have already been sold',
-        );
-      }
+      err.details = {
+        reason: 'sold_from_this_purchase',
+        sales: soldFromThis.map((r) => ({
+          sale_local_id: Number(r.sale_local_id),
+          bill_no: r.bill_no || '',
+          sale_date: r.sale_date,
+          medicine_name: r.medicine_name || '',
+          qty_sold: Number(r.qty_sold || 0),
+        })),
+      };
+      throw err;
     }
+    const purSupplierId = Number(purchases[0].supplier_id || 0);
     await client.query(`DELETE FROM purchase_items WHERE purchase_id=$1`, [purchasePk]);
     await client.query(`DELETE FROM purchases WHERE id=$1`, [purchasePk]);
     await rewindFySerialCounter(client, storePk, 'purchases', purchaseFy);
+    // The supplier's balance still counted this bill. The cascade runs on every
+    // upsert but was never called on a delete, so a removed bill went on showing
+    // as due -- the shop deleted it and the due stayed.
+    if (purSupplierId > 0) {
+      try {
+        const cascaded = await cascadeSupplierAfterLedgerChange(client, storePk, purSupplierId, hint);
+        await noteCascadeChanges(client, hint, storePk, 'suppliers', purSupplierId, 'purchases', cascaded);
+      } catch (e) {
+        console.warn('[cascade] supplier after purchase delete:', e.message);
+      }
+    }
     await noteAcceptedChange(client, hint, storePk, 'purchases', null, 'hard_deleted', {
       localId: lid,
       entityVersion: prevPurVer + 1_000_000,
@@ -1895,6 +2330,7 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
     case 'medicines':
       sql = `SELECT local_id AS id, name, type, stock_qty, unit, gst_percent, mrp, rate,
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
+                    supplier_name,
                     is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
                     client_uuid
              FROM medicines WHERE store_pk=$1${idFilter}${delClause}`;
@@ -2085,6 +2521,7 @@ export async function pullCollection(
     case 'medicines':
       sql = `SELECT local_id AS id, name, type, stock_qty, unit, gst_percent, mrp, rate,
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
+                    supplier_name,
                     is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
                     client_uuid
              FROM medicines WHERE store_pk=$1 AND updated_at > $2${delClause}
@@ -2228,12 +2665,42 @@ export async function pullCollection(
 }
 
 /**
+ * The stock ledger one document wrote: every stock_operations row of this store whose
+ * ref is (refCollection, refId), in the order they were logged. Same row shape as the
+ * stock_operations pull. A purchase edit subtracts exactly these instead of paging the
+ * store's whole ledger (pullDoc and the since-pull cannot filter by ref).
+ */
+export async function fetchStockOpsByRef(storePk, refCollection, refId) {
+  const col = typeof refCollection === 'string' ? refCollection.trim() : '';
+  if (!col) throw new AppError(400, 'ref_collection required');
+  if (col.length > 64) throw new AppError(400, 'Invalid ref_collection');
+  const raw = typeof refId === 'string' || typeof refId === 'number' ? String(refId).trim() : '';
+  if (!/^\d{1,15}$/.test(raw) || Number(raw) <= 0) {
+    throw new AppError(400, 'ref_id must be a positive integer');
+  }
+  const { rows } = await query(
+    `SELECT local_id AS id, op_uuid, medicine_id, op, qty_delta, ref_collection, ref_id,
+            revision, device_id, created_at
+     FROM stock_operations
+     WHERE store_pk=$1 AND ref_collection=$2 AND ref_id=$3
+     ORDER BY local_id ASC`,
+    [storePk, col, Number(raw)],
+  );
+  return rows;
+}
+
+/**
  * Fetch one document by local_id (same shape as pullCollection rows).
  * Sales / purchases / returns include nested items[].
  */
 export async function pullDoc(storePk, collection, localId) {
   const lid = Number(localId);
-  if (!Number.isFinite(lid) || lid <= 0) {
+  // Any non-zero whole number a JavaScript client can hold exactly. The list pulls and
+  // fetchDocsByLocalIds already return rows under a negative local_id (old desktop returns
+  // kept their negative temp id, e.g. ZZ Test's sales_returns -1117777925), and refusing
+  // those here as "Invalid local id" left a listed document that could not be fetched.
+  // Read path only: every query below matches store_pk plus this exact local_id.
+  if (!Number.isSafeInteger(lid) || lid === 0) {
     throw new AppError(400, 'Invalid local id');
   }
   const allowed = [...COLLECTIONS];
@@ -2269,6 +2736,7 @@ export async function pullDoc(storePk, collection, localId) {
     case 'medicines':
       sql = `SELECT local_id AS id, name, type, stock_qty, unit, gst_percent, mrp, rate,
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
+                    supplier_name,
                     is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
                     client_uuid
              FROM medicines WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
@@ -2316,8 +2784,102 @@ export async function pullAll(storePk, { since } = {}) {
   return out;
 }
 
+/** The financial year a number's /FY tag names ("5/FY2025-26" -> 2025), or null. */
+function fyStartYearInCode(code) {
+  const m = String(code || '').trim().match(/\/FY(\d{4})-\d{2}$/i);
+  return m ? Number(m[1]) : null;
+}
+
+/** The serial of a tagged purchase number ("5/FY2025-26" -> 5), or null. */
+function purchaseSerialInCode(code) {
+  const m = String(code || '').trim().match(/^(\d+)\/FY\d{4}-\d{2}$/i);
+  return m ? Number(m[1]) : null;
+}
+
+/** The serial of a tagged sales bill number ("SCB12/FY2026-27" -> 12), or null. */
+function salesSerialInCode(code) {
+  const m = String(code || '').trim().match(/^SCB(\d+)\/FY\d{4}-\d{2}$/i);
+  return m ? Number(m[1]) : null;
+}
+
+/** Push answer fields for a sale, read from the row as STORED. */
+function withStoredSaleNumber(base, row, fallbackFy = null) {
+  const billNo = row?.bill_no ? String(row.bill_no) : '';
+  if (!billNo) return base;
+  const fy = row.fy_start_year ?? fallbackFy;
+  return {
+    ...base,
+    bill_no: billNo,
+    display_bill_no: displaySalesBillNo(billNo),
+    fy_label: fy ? fyLabel(Number(fy)) : null,
+  };
+}
+
+/** Push answer fields for a purchase, read from the row as STORED. */
+function withStoredPurchaseNumber(base, row, fallbackFy = null) {
+  const no = row?.purchase_no ? String(row.purchase_no) : '';
+  if (!no) return base;
+  const fy = row.fy_start_year ?? fallbackFy;
+  return {
+    ...base,
+    purchase_no: no,
+    display_purchase_no: displayPurchaseNo(no),
+    fy_label: fy ? fyLabel(Number(fy)) : null,
+  };
+}
+
+/** Is `purchaseNo` held by a LIVE purchase other than `excludeLocalId`? */
+async function livePurchaseNoTaken(client, storePk, purchaseNo, excludeLocalId) {
+  const { rows } = await client.query(
+    `SELECT 1 FROM purchases
+      WHERE store_pk=$1 AND purchase_no=$2 AND NOT COALESCE(deleted, FALSE)
+        AND local_id <> $3
+      LIMIT 1`,
+    [storePk, purchaseNo, Number(excludeLocalId) || 0]
+  );
+  return rows.length > 0;
+}
+
+/** One advisory lock per store + kind + financial year, held to the end of the transaction. */
+async function lockFySeries(client, storePk, kind, fy) {
+  await client.query(`SELECT pg_advisory_xact_lock($1, hashtext($2))`, [
+    Number(storePk),
+    `fy:${kind}:${Number(fy)}`,
+  ]);
+}
+
+/**
+ * Leave a trail when a stored bill or purchase number changes. Nothing recorded it, so
+ * a missing number (SCB1251/FY2026-27) could only be guessed at from sync_changes.
+ * pm2 log plus an audit_log row, in its own savepoint: failing to write the trail must
+ * never refuse the bill.
+ */
+async function noteNumberChange(client, storePk, { action, localId, from, to, deviceId, detail = {} }) {
+  console.warn(
+    `[numbering] ${action} store=${storePk} local_id=${localId}: ` +
+    `${from || '(none)'} -> ${to} (device ${deviceId || '?'})`
+  );
+  const sp = `sp_audit_${++_spSeq}`;
+  await client.query(`SAVEPOINT ${sp}`);
+  try {
+    await client.query(
+      `INSERT INTO audit_log (actor_type, actor_id, action, store_pk, meta)
+       VALUES ('store', $1, $2, $3, $4::jsonb)`,
+      [
+        deviceId || null, action, storePk,
+        JSON.stringify({ local_id: localId, from: from ?? null, to: to ?? null, ...detail }),
+      ]
+    );
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+  } catch (e) {
+    await client.query(`ROLLBACK TO SAVEPOINT ${sp}`);
+    await client.query(`RELEASE SAVEPOINT ${sp}`);
+    console.warn('[numbering] audit_log row not written:', e.message);
+  }
+}
+
 /** Highest existing FY serial on sales/purchases (handles pre-counter data / migrations). */
-async function maxExistingFySerial(client, storePk, kind, fy) {
+async function maxExistingFySerial(client, storePk, kind, fy, excludeLocalId = null) {
   const table = kind === 'sales' ? 'sales' : 'purchases';
   const dateCol = kind === 'sales' ? 'bill_date' : 'purchase_date';
   const codeCol = kind === 'sales' ? 'bill_no' : 'purchase_no';
@@ -2328,12 +2890,23 @@ async function maxExistingFySerial(client, storePk, kind, fy) {
      FROM ${table}
      WHERE store_pk=$1
        AND COALESCE(is_autosave, FALSE)=FALSE
+       -- Live bills only, so deleting the LATEST bill frees its number for the
+       -- next one and the book reads without gaps -- which is how a pharmacy
+       -- bill book is meant to run. This is safe ONLY because uniqueness is now
+       -- a PARTIAL index (uq_sales_live_bill_no / uq_purchases_live_purchase_no,
+       -- both WHERE NOT deleted): a deleted row keeps its number for the audit
+       -- trail without blocking reuse. Before that index, the full UNIQUE
+       -- constraint rejected the reused number, the server logged "batch
+       -- continues", and the sale was silently lost while its stock and ledger
+       -- writes still applied. Do not drop the partial index.
        AND COALESCE(deleted, FALSE)=FALSE
        AND (
          fy_start_year = $2
          OR (${dateCol} >= $3 AND ${dateCol} <= $4)
-       )`,
-    [storePk, fy, from, to]
+       )
+       -- A bill being re-filed is not a rival for its own new number.
+       AND ($5::bigint IS NULL OR local_id <> $5::bigint)`,
+    [storePk, fy, from, to, excludeLocalId == null ? null : Number(excludeLocalId)]
   );
   let maxSerial = Number(rows[0]?.m || 0);
   // Parse stored codes too (fy_serial may be null after older imports)
@@ -2342,12 +2915,23 @@ async function maxExistingFySerial(client, storePk, kind, fy) {
      FROM ${table}
      WHERE store_pk=$1
        AND COALESCE(is_autosave, FALSE)=FALSE
+       -- Live bills only, so deleting the LATEST bill frees its number for the
+       -- next one and the book reads without gaps -- which is how a pharmacy
+       -- bill book is meant to run. This is safe ONLY because uniqueness is now
+       -- a PARTIAL index (uq_sales_live_bill_no / uq_purchases_live_purchase_no,
+       -- both WHERE NOT deleted): a deleted row keeps its number for the audit
+       -- trail without blocking reuse. Before that index, the full UNIQUE
+       -- constraint rejected the reused number, the server logged "batch
+       -- continues", and the sale was silently lost while its stock and ledger
+       -- writes still applied. Do not drop the partial index.
        AND COALESCE(deleted, FALSE)=FALSE
        AND (
          fy_start_year = $2
          OR (${dateCol} >= $3 AND ${dateCol} <= $4)
-       )`,
-    [storePk, fy, from, to]
+       )
+       -- A bill being re-filed is not a rival for its own new number.
+       AND ($5::bigint IS NULL OR local_id <> $5::bigint)`,
+    [storePk, fy, from, to, excludeLocalId == null ? null : Number(excludeLocalId)]
   );
     for (const row of codes) {
     const raw = String(row.code || '');
@@ -2404,15 +2988,48 @@ export async function peekFySerial(storePk, kind, dateValue) {
 }
 
 /** Allocate next FY serial atomically (seeded from existing bills so we never restart at 1). */
+/** Allocate a serial in `fy` for a bill whose claimed year was wrong.
+ *
+ *  The year is part of the number, so a bill filed under the wrong year takes
+ *  the wrong year's series with it. One purchase dated 2026-08-31 arrived
+ *  claiming FY 2020 and was filed as 1/FY2020-21, so the shop's numbering
+ *  appeared to restart at 1 half way through the year. The date is what the
+ *  shop typed and can see on screen, so the date decides.
+ */
+async function reallocateSerialForFy(client, storePk, kind, fy, excludeLocalId) {
+  const year = Number(fy);
+  // Same lock and same "highest LIVE number + 1" as /fy/allocate. This used to read
+  // MAX(fy_serial) alone and take no lock, so a re-filed bill and a number a client had
+  // just been handed could be the same, and the two paths disagreed on what "next" was
+  // (a phone could adopt a third number the store did not hold).
+  await lockFySeries(client, storePk, kind, year);
+  const serial = (await maxExistingFySerial(client, storePk, kind, year, excludeLocalId)) + 1;
+  await client.query(
+    `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
+     VALUES ($1,$2,$3,$4)
+     ON CONFLICT (store_pk, kind, fy_start_year)
+     DO UPDATE SET last_serial = GREATEST(fy_serials.last_serial, EXCLUDED.last_serial)`,
+    [storePk, kind, year, serial]
+  );
+  return serial;
+}
+
+/** Allocate a serial for a bill that arrived without one at all.
+ *
+ *  Falling back to the row's internal id produced numbers like
+ *  "3019/FY2026-27" where the shop expected 104.
+ */
+async function serialWhenMissing(client, storePk, kind, fy, excludeLocalId) {
+  return reallocateSerialForFy(client, storePk, kind, fy, excludeLocalId);
+}
+
 export async function allocateFySerial(storePk, kind, dateValue) {
   const fy = fyStartYearForDate(dateValue);
   return withTransaction(async (client) => {
-    await client.query(`SELECT pg_advisory_xact_lock($1, hashtext($2))`, [
-      Number(storePk),
-      `fy:${kind}:${fy}`,
-    ]);
+    await lockFySeries(client, storePk, kind, fy);
     const dataMax = await maxExistingFySerial(client, storePk, kind, fy);
-    // Next number is max(live bills)+1 so deleting the latest reuses it.
+    // Next number is max(LIVE bills)+1, so deleting the latest bill hands its
+    // number straight back to the next one. Safe only with the partial indexes.
     await client.query(
       `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
        VALUES ($1, $2, $3, $4)

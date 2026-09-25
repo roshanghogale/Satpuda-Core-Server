@@ -39,6 +39,42 @@ ALTER TABLE stores ADD COLUMN IF NOT EXISTS apply_expiry_check BOOLEAN NOT NULL 
 
 CREATE INDEX IF NOT EXISTS idx_stores_android_key ON stores(android_key) WHERE android_key IS NOT NULL;
 
+-- Self-service trial: this store was created by the installer through
+-- /api/provision/trial, not by an administrator in the panel. Strangers can
+-- reach that endpoint, so the flag exists to make every such store obvious in
+-- the admin panel and killable in one click.
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS provisioned_trial BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- One row per granted trial. This table -- never the stores table -- is what
+-- the rate limits are counted from, and it is what the admin panel lists so the
+-- owner can see who signed up, from which computer and which address.
+CREATE TABLE IF NOT EXISTS store_provisions (
+  id             SERIAL PRIMARY KEY,
+  store_pk       INT REFERENCES stores(id) ON DELETE SET NULL,
+  device_id      TEXT NOT NULL,     -- the id the PC reports for store_devices
+  machine_id     TEXT,              -- hardware fingerprint, when the PC could read one
+  ip             TEXT,
+  requested_name TEXT NOT NULL,      -- exactly what was typed in the installer
+  app_version    TEXT,
+  user_agent     TEXT,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_provisions_device ON store_provisions(device_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_store_provisions_machine ON store_provisions(machine_id, created_at DESC) WHERE machine_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_store_provisions_ip ON store_provisions(ip, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_store_provisions_created ON store_provisions(created_at DESC);
+
+-- Server-wide switches the owner can flip from the admin panel without a
+-- deploy. Right now there is exactly one: whether the public trial sign-up is
+-- open. A per-store "turn off" only helps AFTER a store has been created, so
+-- without this the owner can clean up an abusive run but cannot stop it.
+CREATE TABLE IF NOT EXISTS app_flags (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS store_devices (
   id            SERIAL PRIMARY KEY,
   store_pk      INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
@@ -146,6 +182,9 @@ CREATE TABLE IF NOT EXISTS medicines (
   schedule      TEXT,
   location      TEXT,
   content_drug  TEXT,
+  -- Where the shop got this stock. Written by opening stock, which has no bill
+  -- behind it to carry a supplier. Reference only: no supplier row, no due.
+  supplier_name TEXT,
   is_hidden     BOOLEAN NOT NULL DEFAULT FALSE,
   synced_at     TIMESTAMPTZ,
   created_at    TIMESTAMPTZ,
@@ -812,3 +851,18 @@ WHERE m.store_pk = pi.store_pk
     pi.unit IS NULL OR btrim(pi.unit) = ''
     OR pi.tablets_per_stripe IS NULL
   );
+
+-- Logins for the sales demonstration site (demo.satpudacore.online).
+-- Not store devices and not administrators: a demo account opens the
+-- demonstration copy of the desktop UI and nothing else.
+CREATE TABLE IF NOT EXISTS demo_users (
+  id            SERIAL PRIMARY KEY,
+  username      TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  name          TEXT,
+  note          TEXT,
+  is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_login_at TIMESTAMPTZ,
+  login_count   INTEGER NOT NULL DEFAULT 0
+);

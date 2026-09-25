@@ -55,8 +55,16 @@ function cascadePurchasesFifo(billsOldestFirst, standalonePayments, returnRefund
   });
 }
 
-/** Recalculate customer balance + FIFO-clear sales after payment/return. */
-export async function cascadeCustomerAfterLedgerChange(client, storePk, customerLocalId, hint = null) {
+/**
+ * Recalculate customer balance + FIFO-clear sales after payment/return.
+ *
+ * onlyIfChanged: rewrite the customer row (version + 1, updated_at NOW()) only when its
+ * stored due/credit differ from the ledger. Used after a pushed customer document, so a
+ * device that sent the right figure is not made to re-pull it.
+ */
+export async function cascadeCustomerAfterLedgerChange(
+  client, storePk, customerLocalId, hint = null, { onlyIfChanged = false } = {},
+) {
   const cid = Number(customerLocalId);
   if (!cid) return { updated: 0 };
 
@@ -81,11 +89,14 @@ export async function cascadeCustomerAfterLedgerChange(client, storePk, customer
   const totalDue = net > 0 ? net : 0;
   const totalCredit = net < 0 ? Math.abs(net) : 0;
 
-  await client.query(
+  const { rowCount: partyRows } = await client.query(
     `UPDATE customers SET total_due=$3, total_credit=$4, updated_at=NOW(),
             version = COALESCE(version,0) + 1
-     WHERE store_pk=$1 AND local_id=$2 AND NOT deleted`,
-    [storePk, cid, totalDue, totalCredit],
+     WHERE store_pk=$1 AND local_id=$2 AND NOT deleted
+       AND (NOT $5::boolean
+            OR ABS(COALESCE(total_due,0) - $3) > 0.009
+            OR ABS(COALESCE(total_credit,0) - $4) > 0.009)`,
+    [storePk, cid, totalDue, totalCredit, Boolean(onlyIfChanged)],
   );
 
   const { rows: sales } = await client.query(
@@ -93,6 +104,7 @@ export async function cascadeCustomerAfterLedgerChange(client, storePk, customer
             COALESCE(total_amount,0)::float AS total_amount,
             COALESCE(amount_paid,0)::float AS amount_paid,
             COALESCE(total_due,0)::float AS total_due,
+            COALESCE(due_amount,0)::float AS due_amount,
             account_cleared, bill_cleared
      FROM sales
      WHERE store_pk=$1 AND customer_id=$2 AND NOT deleted AND NOT is_autosave
@@ -116,8 +128,12 @@ export async function cascadeCustomerAfterLedgerChange(client, storePk, customer
     const cleared = !!f.accountCleared;
     const rem = r2(f.remainingDue);
     const billCleared = rem <= 0.01;
+    // due_amount is written with total_due below, so it is compared too: a bill whose
+    // total_due was right but whose due_amount was stale never counted as dirty and
+    // kept showing the stale figure (store 127: 42 bills).
     if (
       Math.abs(Number(row.total_due) - rem) > 0.009 ||
+      Math.abs(Number(row.due_amount) - rem) > 0.009 ||
       Boolean(row.account_cleared) !== cleared ||
       Boolean(row.bill_cleared) !== billCleared
     ) {
@@ -141,11 +157,16 @@ export async function cascadeCustomerAfterLedgerChange(client, storePk, customer
       [dirtyIds, dirtyRem, dirtyCleared, dirtyBill, storePk],
     );
   }
-  return { updated, totalDue, totalCredit, dirtyLocalIds };
+  return { updated, totalDue, totalCredit, dirtyLocalIds, partyUpdated: partyRows > 0 };
 }
 
-/** Recalculate supplier balance + FIFO-clear purchases after payment/return. */
-export async function cascadeSupplierAfterLedgerChange(client, storePk, supplierLocalId, hint = null) {
+/**
+ * Recalculate supplier balance + FIFO-clear purchases after payment/return.
+ * onlyIfChanged: as for customers.
+ */
+export async function cascadeSupplierAfterLedgerChange(
+  client, storePk, supplierLocalId, hint = null, { onlyIfChanged = false } = {},
+) {
   const sid = Number(supplierLocalId);
   if (!sid) return { updated: 0 };
 
@@ -170,11 +191,14 @@ export async function cascadeSupplierAfterLedgerChange(client, storePk, supplier
   const totalDue = net > 0 ? net : 0;
   const totalCredit = net < 0 ? Math.abs(net) : 0;
 
-  await client.query(
+  const { rowCount: partyRows } = await client.query(
     `UPDATE suppliers SET total_due=$3, total_credit=$4, updated_at=NOW(),
             version = COALESCE(version,0) + 1
-     WHERE store_pk=$1 AND local_id=$2 AND NOT deleted`,
-    [storePk, sid, totalDue, totalCredit],
+     WHERE store_pk=$1 AND local_id=$2 AND NOT deleted
+       AND (NOT $5::boolean
+            OR ABS(COALESCE(total_due,0) - $3) > 0.009
+            OR ABS(COALESCE(total_credit,0) - $4) > 0.009)`,
+    [storePk, sid, totalDue, totalCredit, Boolean(onlyIfChanged)],
   );
 
   const { rows: purchases } = await client.query(
@@ -230,5 +254,5 @@ export async function cascadeSupplierAfterLedgerChange(client, storePk, supplier
       [dirtyIds, dirtyRem, dirtyCleared, storePk],
     );
   }
-  return { updated, totalDue, totalCredit, dirtyLocalIds };
+  return { updated, totalDue, totalCredit, dirtyLocalIds, partyUpdated: partyRows > 0 };
 }
