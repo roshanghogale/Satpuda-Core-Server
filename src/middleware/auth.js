@@ -78,7 +78,7 @@ const _storeAuthCache = new Map();
 
 const STORE_AUTH_COLS = `id, store_id, store_key, store_name, is_active,
   activation_date, expiry_enabled, expiry_date, apply_expiry_check,
-  provisioned_trial`;
+  provisioned_trial, voice_enabled, voice_tier`;
 
 export function invalidateStoreAuthCache(storePk = null) {
   if (storePk == null) {

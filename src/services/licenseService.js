@@ -64,6 +64,31 @@ export function expiryFromActivation(activationDate, days = DEFAULT_EXPIRY_DAYS)
   return addDaysYmd(activationDate, days);
 }
 
+/** The four levels an administrator may cap a shop PC at. */
+export const VOICE_TIERS = Object.freeze(['auto', '1', '2', '3']);
+
+/**
+ * A stored or submitted voice tier, as one of VOICE_TIERS, or null when it is
+ * not one. Numbers are accepted (the panel's select may hand over 2, not '2').
+ */
+export function parseVoiceTier(value) {
+  if (value === undefined || value === null) return null;
+  const t = String(value).trim().toLowerCase();
+  return VOICE_TIERS.includes(t) ? t : null;
+}
+
+/**
+ * The voice switch as a device should read it. OFF unless the row says TRUE --
+ * a row from before the column existed, or a NULL, is OFF -- and an unknown
+ * tier reads as 'auto' rather than as something the PC might over-run.
+ */
+export function voiceFields(store) {
+  return {
+    voice_enabled: store?.voice_enabled === true,
+    voice_tier: parseVoiceTier(store?.voice_tier) || 'auto',
+  };
+}
+
 export function licensePayload(store) {
   const activationDate = toDateOnly(store.activation_date);
   const expiryDate = toDateOnly(store.expiry_date);
@@ -91,6 +116,10 @@ export function licensePayload(store) {
     // with the server about how long a trial is.
     trial_days: DEFAULT_EXPIRY_DAYS,
     is_trial: Boolean(store.provisioned_trial),
+    // Voice assistant switch (admin panel only). Deliberately NOT inside the
+    // signed blob: it is a feature toggle, not access, and old blobs must keep
+    // verifying. A desktop that finds no field treats voice as OFF.
+    ...voiceFields(store),
   };
 }
 
@@ -112,7 +141,7 @@ export function evaluateAccess(store, today = null) {
 /** The columns a licence is decided from, plus the row version the seal signs. */
 const LICENSE_COLS = `id, store_id, store_key, store_name, is_active,
             activation_date, expiry_enabled, expiry_date, apply_expiry_check,
-            provisioned_trial, updated_at`;
+            provisioned_trial, voice_enabled, voice_tier, updated_at`;
 
 /**
  * The raw store row behind a licence.
@@ -203,7 +232,7 @@ export async function updateStoreLicenseRow(storePk, patch = {}) {
     `UPDATE stores SET ${fields.join(', ')} WHERE id = $${i} RETURNING
        id, store_id, store_key, store_name, is_active,
        activation_date, expiry_enabled, expiry_date, apply_expiry_check,
-       provisioned_trial, updated_at`,
+       provisioned_trial, voice_enabled, voice_tier, updated_at`,
     vals
   );
   if (!rows[0]) throw new AppError(404, 'Store not found');

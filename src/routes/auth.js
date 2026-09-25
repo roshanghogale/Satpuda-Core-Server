@@ -94,7 +94,11 @@ router.put('/auth/license', requireStoreIdentity, asyncHandler(async (req, res) 
   // disable expiry permanently, and requireStoreIdentity deliberately skips the
   // access gate, so even an already-expired store could un-expire itself.
   const body = { ...(req.body || {}) };
-  for (const k of ['is_active', 'expiry_enabled', 'apply_expiry_check', 'expiry_date', 'force_activation_date']) {
+  // The voice switch is the vendor's to flip from the admin panel, never the
+  // shop's (updateStoreLicenseRow ignores it anyway; this keeps it that way if
+  // that function ever learns to write it).
+  for (const k of ['is_active', 'expiry_enabled', 'apply_expiry_check', 'expiry_date', 'force_activation_date',
+    'voice_enabled', 'voice_tier']) {
     delete body[k];
   }
   ok(res, await updateStoreLicense(storePk, body));

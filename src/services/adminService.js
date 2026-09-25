@@ -1,5 +1,6 @@
 import { query } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
+import { parseVoiceTier, VOICE_TIERS } from './licenseService.js';
 import {
   generateAndroidKey,
   slugifyStoreId,
@@ -211,6 +212,21 @@ export async function updateStore(idOrSlug, patch) {
   if (patch.activation_date !== undefined) {
     fields.push(`activation_date = $${i++}`);
     vals.push(patch.activation_date ? String(patch.activation_date).slice(0, 10) : null);
+  }
+  // Voice assistant switch. Strict on purpose: Boolean('false') is true, so a
+  // string here would silently turn voice ON for a shop.
+  if (patch.voice_enabled !== undefined) {
+    if (typeof patch.voice_enabled !== 'boolean') {
+      throw new AppError(400, 'voice_enabled must be true or false');
+    }
+    fields.push(`voice_enabled = $${i++}`);
+    vals.push(patch.voice_enabled);
+  }
+  if (patch.voice_tier !== undefined) {
+    const tier = parseVoiceTier(patch.voice_tier);
+    if (!tier) throw new AppError(400, `voice_tier must be one of ${VOICE_TIERS.join(', ')}`);
+    fields.push(`voice_tier = $${i++}`);
+    vals.push(tier);
   }
   if (!fields.length) return store;
   fields.push('updated_at = NOW()');

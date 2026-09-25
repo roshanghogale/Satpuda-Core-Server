@@ -41,6 +41,18 @@ function ChipList({ items }) {
   );
 }
 
+const VOICE_TIER_OPTIONS = [
+  ['auto', 'Auto'],
+  ['1', '1 Basic'],
+  ['2', '2 Advanced'],
+  ['3', '3 Full'],
+];
+
+function normVoiceTier(value) {
+  const t = String(value ?? '').trim().toLowerCase();
+  return VOICE_TIER_OPTIONS.some(([v]) => v === t) ? t : 'auto';
+}
+
 function AccessControlPanel({ store, onSave }) {
   const [isActive, setIsActive] = useState(Boolean(store.is_active));
   const [applyExpiry, setApplyExpiry] = useState(store.apply_expiry_check !== false);
@@ -51,10 +63,14 @@ function AccessControlPanel({ store, onSave }) {
   const [activationDate, setActivationDate] = useState(
     store.activation_date ? String(store.activation_date).slice(0, 10) : '',
   );
+  const [voiceEnabled, setVoiceEnabled] = useState(store.voice_enabled === true);
+  const [voiceTier, setVoiceTier] = useState(normVoiceTier(store.voice_tier));
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
 
   useEffect(() => {
+    setVoiceEnabled(store.voice_enabled === true);
+    setVoiceTier(normVoiceTier(store.voice_tier));
     setIsActive(Boolean(store.is_active));
     setApplyExpiry(store.apply_expiry_check !== false);
     setExpiryEnabled(Boolean(store.expiry_enabled));
@@ -72,6 +88,8 @@ function AccessControlPanel({ store, onSave }) {
         expiry_enabled: expiryEnabled,
         expiry_date: expiryDate || null,
         activation_date: activationDate || null,
+        voice_enabled: voiceEnabled,
+        voice_tier: voiceTier,
       });
       setMsg('Access settings saved. Online devices use this immediately.');
     } catch (e) {
@@ -159,6 +177,41 @@ function AccessControlPanel({ store, onSave }) {
             }}
           />
         </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Voice assistant</div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={voiceEnabled}
+              onChange={(e) => setVoiceEnabled(e.target.checked)}
+            />
+            Voice assistant on
+          </label>
+        </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Voice level</div>
+          <select
+            value={voiceTier}
+            onChange={(e) => setVoiceTier(e.target.value)}
+            disabled={!voiceEnabled}
+            style={{
+              background: 'var(--bg2)',
+              border: '1px solid var(--line)',
+              color: 'var(--text)',
+              padding: '8px 10px',
+              borderRadius: 8,
+              width: '100%',
+            }}
+          >
+            {VOICE_TIER_OPTIONS.map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="muted" style={{ fontSize: '0.78rem', margin: '-4px 0 12px' }}>
+        Off = the shop's app shows no voice button. Level caps what the shop PC runs
+        (1 = wake word + your-voice check, 2 = + small local AI, 3 = + large AI and better hearing).
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <button className="btn sm" disabled={saving} onClick={save}>

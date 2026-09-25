@@ -37,6 +37,15 @@ ALTER TABLE stores ADD COLUMN IF NOT EXISTS expiry_enabled BOOLEAN NOT NULL DEFA
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS expiry_date DATE;
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS apply_expiry_check BOOLEAN NOT NULL DEFAULT TRUE;
 
+-- Voice assistant, per store, switched from the admin panel. OFF unless the
+-- owner turns it on: a shop that has never been touched shows no voice button.
+-- voice_tier caps what the shop PC runs: 'auto' (the PC decides from its own
+-- hardware), '1' wake word + speaker check, '2' + small local AI,
+-- '3' + large AI and better hearing. Not part of the signed licence blob: a
+-- missing value anywhere on the desktop means OFF.
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS voice_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS voice_tier TEXT NOT NULL DEFAULT 'auto';
+
 CREATE INDEX IF NOT EXISTS idx_stores_android_key ON stores(android_key) WHERE android_key IS NOT NULL;
 
 -- Self-service trial: this store was created by the installer through
