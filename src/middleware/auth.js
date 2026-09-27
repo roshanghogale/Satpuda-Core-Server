@@ -41,6 +41,17 @@ export async function adminLogin(username, password) {
   return { admin, token: signAdminToken(admin) };
 }
 
+/** A store name as a comparable label: "Store_Shree_Gajanan_Medical_General_Stores" and
+ *  "Shree Gajanan Medical & General Stores" both give "shree gajanan medical general stores". */
+export function normalizeStoreName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/^store[_\s]+/, '')
+    .replace(/[&_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** Pair device with store via android_key (SC-XXXXXXXX) */
 export async function pairStore({ androidKey, storeName, deviceId, deviceType = 'pc', deviceName }) {
   const { rows } = await query(
@@ -51,10 +62,20 @@ export async function pairStore({ androidKey, storeName, deviceId, deviceType = 
   if (!store) throw new AppError(404, 'Invalid store key');
   // Do not assertStoreAccess here — pairing only proves the SC- key so clients can
   // refresh JWT and call /auth/license. Business APIs still enforce access.
+  //
+  // The SC- key is the identity; the name the PC sends is only a label. It used to
+  // be compared letter for letter, so a PC whose local name was its folder key
+  // ("Store_Shree_Gajanan_Medical_General_Stores") could never re-pair with the
+  // server's "Shree Gajanan Medical & General Stores" once its 7-day token ran out,
+  // and the shop went offline (2026-09-27). Names are now compared without "&",
+  // "_", a leading "Store_" or extra spaces, and a PC whose name still differs is
+  // paired anyway -- the difference is only logged.
   if (storeName) {
-    const a = String(storeName).trim().toLowerCase();
-    const b = String(store.store_name).trim().toLowerCase();
-    if (a && b && a !== b) throw new AppError(403, 'Store name does not match key');
+    const a = normalizeStoreName(storeName);
+    const b = normalizeStoreName(store.store_name);
+    if (a && b && a !== b) {
+      console.warn(`[pair] store ${store.store_id}: PC calls it "${String(storeName).trim()}", server "${store.store_name}" -- paired by key`);
+    }
   }
   if (deviceId) {
     await query(
