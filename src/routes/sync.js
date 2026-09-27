@@ -95,17 +95,30 @@ router.post('/allocate-ids', asyncHandler(async (req, res) => {
   ok(res, await allocateLocalIds(await storePk(req), requests));
 }));
 
+/** A bill date the FY series can use: YYYY-MM-DD with a year from 2000 to 2100, or none.
+ *  A PC typing a year into its Bill Date box sent "0020-07-21" and Postgres threw a 500
+ *  (118 times in the log, 2026-09-27): that is a bad request, said as one. */
+function fyDate(date) {
+  if (date == null || date === '') return date;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date).trim().slice(0, 10));
+  const year = m ? Number(m[1]) : 0;
+  if (!m || year < 2000 || year > 2100) {
+    throw new AppError(400, 'date must be YYYY-MM-DD with a year from 2000 to 2100');
+  }
+  return m[0];
+}
+
 router.post('/fy/allocate', asyncHandler(async (req, res) => {
   const { kind, date } = req.body || {};
   if (!['sales', 'purchases'].includes(kind)) throw new AppError(400, 'kind must be sales|purchases');
-  ok(res, await allocateFySerial(await storePk(req), kind, date));
+  ok(res, await allocateFySerial(await storePk(req), kind, fyDate(date)));
 }));
 
 router.get('/fy/peek', asyncHandler(async (req, res) => {
   const kind = req.query.kind;
   const date = req.query.date;
   if (!['sales', 'purchases'].includes(kind)) throw new AppError(400, 'kind must be sales|purchases');
-  ok(res, await peekFySerial(await storePk(req), kind, date));
+  ok(res, await peekFySerial(await storePk(req), kind, fyDate(date)));
 }));
 
 router.put('/settings/pharmacy_profile', asyncHandler(async (req, res) => {
