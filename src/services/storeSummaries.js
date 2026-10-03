@@ -355,7 +355,7 @@ export async function inventorySummary(storePk) {
   let outOfStock = 0;
   for (const qty of byName.values()) {
     if (qty <= 0) outOfStock += 1;
-    else if (qty <= 10) lowStock += 1;
+    else if (qty < 10) lowStock += 1;   // the app: 0 < qty < 10
   }
 
   return {

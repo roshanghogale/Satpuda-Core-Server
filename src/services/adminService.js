@@ -330,10 +330,24 @@ export async function storeDashboard(storePk) {
        ORDER BY bill_date DESC, local_id DESC LIMIT 15`,
       [storePk]
     ),
+    // Low stock the way the shop's app judges it (mac2 fetch_low_stock_alerts):
+    // one row per medicine name, its batches in stock summed, 0 < total < 10, in
+    // name order. This used to list single batch rows at <= 10, lowest first,
+    // cut at 20 -- so a store with twenty batches at 1 showed only those.
     query(
-      `SELECT local_id AS id, name, batch_no, stock_qty, mrp, expiry_date
-       FROM medicines WHERE store_pk=$1 AND NOT deleted AND NOT is_hidden AND stock_qty > 0 AND stock_qty <= 10
-       ORDER BY stock_qty ASC LIMIT 20`,
+      `SELECT id, name, batch_no, stock_qty, mrp, expiry_date FROM (
+         SELECT name,
+                SUM(stock_qty) FILTER (WHERE stock_qty > 0)::float AS stock_qty,
+                SUM(COALESCE(stock_qty,0)) AS total,
+                (array_agg(local_id ORDER BY stock_qty DESC NULLS LAST, local_id))[1] AS id,
+                (array_agg(batch_no ORDER BY stock_qty DESC NULLS LAST, local_id))[1] AS batch_no,
+                (array_agg(mrp ORDER BY stock_qty DESC NULLS LAST, local_id))[1] AS mrp,
+                (array_agg(expiry_date ORDER BY stock_qty DESC NULLS LAST, local_id))[1] AS expiry_date
+         FROM medicines WHERE store_pk=$1 AND NOT deleted AND NOT is_hidden
+         GROUP BY name
+       ) n
+       WHERE total > 0 AND stock_qty > 0 AND stock_qty < 10
+       ORDER BY lower(name), name LIMIT 500`,
       [storePk]
     ),
     query(
