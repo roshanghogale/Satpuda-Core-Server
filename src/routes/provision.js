@@ -64,6 +64,8 @@ router.post(
       // the per-address grant limit below something the caller sets for itself.
       ip: trustedClientIp(req),
       userAgent: req.headers['user-agent'],
+      // Strictly true: "a shop with this name exists, make a new one anyway".
+      confirmNew: body.confirm_new === true,
     });
     const { store, license } = result;
     // Handed over so the desktop is Online in one call instead of pairing again

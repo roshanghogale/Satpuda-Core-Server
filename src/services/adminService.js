@@ -209,6 +209,15 @@ export async function updateStore(idOrSlug, patch) {
     fields.push(`expiry_date = $${i++}`);
     vals.push(patch.expiry_date ? String(patch.expiry_date).slice(0, 10) : null);
   }
+  // A trial made a full shop: the label only (TRIAL badge, Trials filter). The
+  // licence is the expiry fields above; nothing in the apps reads this flag.
+  if (patch.provisioned_trial !== undefined) {
+    if (typeof patch.provisioned_trial !== 'boolean') {
+      throw new AppError(400, 'provisioned_trial must be true or false');
+    }
+    fields.push(`provisioned_trial = $${i++}`);
+    vals.push(patch.provisioned_trial);
+  }
   if (patch.activation_date !== undefined) {
     fields.push(`activation_date = $${i++}`);
     vals.push(patch.activation_date ? String(patch.activation_date).slice(0, 10) : null);

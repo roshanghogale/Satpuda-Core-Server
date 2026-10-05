@@ -260,7 +260,7 @@ const UNIQUE_VIOLATION = '23505';
  * Returns the created store, a freshly signed store token, and the licence.
  */
 export async function provisionTrial({
-  storeName, deviceId, machineId, appVersion, deviceName, ip, userAgent,
+  storeName, deviceId, machineId, appVersion, deviceName, ip, userAgent, confirmNew = false,
 }) {
   const requestedName = cleanStoreName(storeName);
   const device = cleanDeviceId(deviceId);
@@ -279,6 +279,34 @@ export async function provisionTrial({
   // closed the sign-up altogether.
   if (!(await trialsEnabled())) {
     throw new AppError(503, 'New sign-ups are closed just now. Please contact Satpuda.');
+  }
+
+  // A shop already on the server, reinstalled: the shopkeeper types its name on
+  // the trial page and gets a SECOND, empty store with the same name (Vaibhav,
+  // 5 Oct 2026: store 142 beside the real 131; 134 and 137 before it). The name
+  // still never resolves to that store -- anyone can type a name -- so the answer
+  // is only "this name is taken; connect with the shop's SC- key, or say you
+  // really want a new shop" (confirm_new). Compared on letters and digits alone,
+  // so "Vaibhav Medical & Gen Sto" and "vaibhav medical gen sto" are one name.
+  if (!confirmNew) {
+    const { rows: same } = await query(
+      `SELECT 1 FROM stores
+        WHERE is_active
+          AND regexp_replace(lower(store_name), '[^[:alnum:]]+', '', 'g')
+            = regexp_replace(lower($1), '[^[:alnum:]]+', '', 'g')
+          AND regexp_replace(lower($1), '[^[:alnum:]]+', '', 'g') <> ''
+        LIMIT 1`,
+      [requestedName],
+    );
+    if (same.length) {
+      throw new AppError(
+        409,
+        `A shop called "${requestedName}" is already on Satpuda. If it is your shop, connect this `
+          + "computer with the shop's SC- key (Satpuda admin panel, next to the shop) instead of "
+          + 'starting a new trial.',
+        { code: 'name_exists' },
+      );
+    }
   }
 
   await assertWithinLimits({ deviceId: device, machineId: machine, ip: address });

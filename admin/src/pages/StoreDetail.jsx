@@ -53,10 +53,125 @@ function normVoiceTier(value) {
   return VOICE_TIER_OPTIONS.some(([v]) => v === t) ? t : 'auto';
 }
 
+/**
+ * Delete a store -- the screen the server's delete API never had (5 Oct 2026).
+ * Server-side guards stay in charge: the SSH switch (two hours), the typed name
+ * (never overridable), and "this store still looks active" (force, recorded).
+ */
+function DeleteStorePanel({ store }) {
+  const [report, setReport] = useState(null);
+  const [typed, setTyped] = useState('');
+  const [force, setForce] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+  const [done, setDone] = useState(false);
+
+  async function preview() {
+    setBusy(true);
+    setMsg('');
+    try {
+      setReport(await api(`/admin/stores/${store.id}/delete-preview`));
+    } catch (e) {
+      setMsg(e.message || 'Could not check this store');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove() {
+    setBusy(true);
+    setMsg('');
+    try {
+      await api(`/admin/stores/${store.id}/delete`, {
+        method: 'POST',
+        body: { confirm_name: typed, force: report?.blocked ? force : false },
+      });
+      setDone(true);
+      setMsg(`"${store.store_name}" and all its records were deleted.`);
+    } catch (e) {
+      setMsg(e.message || 'Delete failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
+        <p>{msg}</p>
+        <a className="btn sm" href="/admin/">Back to stores</a>
+      </div>
+    );
+  }
+
+  const last = report?.last_activity || {};
+  return (
+    <div className="panel" style={{ padding: 16, marginBottom: 16, borderColor: 'var(--danger, #c0392b)' }}>
+      <div className="panel-h" style={{ padding: '0 0 12px' }}>
+        <h3 style={{ margin: 0 }}>Delete store</h3>
+      </div>
+      {!report ? (
+        <>
+          <p className="muted" style={{ marginTop: 0 }}>
+            Removes this store and every bill, purchase, customer and medicine in it from the server.
+            It cannot be undone. Take a database backup first.
+          </p>
+          <button className="btn sm" disabled={busy} onClick={preview}>
+            {busy ? 'Checking…' : 'Delete this store…'}
+          </button>
+        </>
+      ) : (
+        <>
+          <p style={{ marginTop: 0 }}>
+            <strong>{store.store_name}</strong>: {last.total_sales || 0} bills, {last.total_purchases || 0} purchases,
+            {' '}{report.total_child_rows} records in all. Last bill: {last.last_sale_date || 'none'}.
+          </p>
+          {report.blocked && (
+            <div className="error" style={{ marginBottom: 10 }}>
+              This store still looks like a working shop: {(report.reasons || []).join('; ')}
+            </div>
+          )}
+          <div className="settings-field" style={{ marginBottom: 10 }}>
+            <div className="muted settings-field-label">Type the store name exactly to confirm</div>
+            <input
+              className="settings-input"
+              value={typed}
+              placeholder={report.confirm_name_required}
+              onChange={(e) => setTyped(e.target.value)}
+            />
+          </div>
+          {report.blocked && (
+            <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+              <input type="checkbox" checked={force} onChange={(e) => setForce(e.target.checked)} />
+              I know this shop is in use - delete it anyway
+            </label>
+          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="btn sm"
+              disabled={busy || typed.trim() !== String(report.confirm_name_required).trim() || (report.blocked && !force)}
+              onClick={remove}
+            >
+              {busy ? 'Deleting…' : 'Delete permanently'}
+            </button>
+            <button className="btn sm" disabled={busy} onClick={() => { setReport(null); setTyped(''); setForce(false); }}>
+              Cancel
+            </button>
+          </div>
+        </>
+      )}
+      {msg && <p className="muted" style={{ marginBottom: 0 }}>{msg}</p>}
+    </div>
+  );
+}
+
 function AccessControlPanel({ store, onSave }) {
   const [isActive, setIsActive] = useState(Boolean(store.is_active));
   const [applyExpiry, setApplyExpiry] = useState(store.apply_expiry_check !== false);
   const [expiryEnabled, setExpiryEnabled] = useState(Boolean(store.expiry_enabled));
+  // A trial made a full shop: only the TRIAL label (and the Trials filter). The
+  // licence is the expiry fields; no app reads this flag.
+  const [isTrial, setIsTrial] = useState(store.provisioned_trial === true);
   const [expiryDate, setExpiryDate] = useState(
     store.expiry_date ? String(store.expiry_date).slice(0, 10) : '',
   );
@@ -74,6 +189,7 @@ function AccessControlPanel({ store, onSave }) {
     setIsActive(Boolean(store.is_active));
     setApplyExpiry(store.apply_expiry_check !== false);
     setExpiryEnabled(Boolean(store.expiry_enabled));
+    setIsTrial(store.provisioned_trial === true);
     setExpiryDate(store.expiry_date ? String(store.expiry_date).slice(0, 10) : '');
     setActivationDate(store.activation_date ? String(store.activation_date).slice(0, 10) : '');
   }, [store]);
@@ -90,6 +206,7 @@ function AccessControlPanel({ store, onSave }) {
         activation_date: activationDate || null,
         voice_enabled: voiceEnabled,
         voice_tier: voiceTier,
+        provisioned_trial: isTrial,
       });
       setMsg('Access settings saved. Online devices use this immediately.');
     } catch (e) {
@@ -147,6 +264,17 @@ function AccessControlPanel({ store, onSave }) {
               onChange={(e) => setApplyExpiry(e.target.checked)}
             />
             Enforce expiry date from server
+          </label>
+        </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Trial store</div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={isTrial}
+              onChange={(e) => setIsTrial(e.target.checked)}
+            />
+            Show as TRIAL (untick when the shop has paid)
           </label>
         </div>
         <div className="settings-field">
@@ -502,6 +630,7 @@ export default function StoreDetail() {
       </div>
 
       <AccessControlPanel store={store} onSave={saveAccess} />
+      <DeleteStorePanel store={store} />
 
       <div className="tabs">
         {TABS.map((t) => (
