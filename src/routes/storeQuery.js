@@ -33,6 +33,24 @@ router.get('/summaries/purchases', asyncHandler(async (req, res) => {
   }));
 }));
 
+// The same two summaries with the filters in a JSON body. A scoped summary names
+// every bill on screen (`ids`), and on a big shop that list ran past the 16 KB
+// request-line limit: Android Sales History on a ~4,300-bill store failed with
+// HTTP 431 (5 Oct 2026). A body has no such limit; GET stays for older apps.
+router.post('/summaries/sales', asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  ok(res, await summaries.salesSummary(await storePk(req), {
+    from: b.from, to: b.to, q: b.q, ids: b.ids, scoped: b.scoped,
+  }));
+}));
+
+router.post('/summaries/purchases', asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  ok(res, await summaries.purchasesSummary(await storePk(req), {
+    from: b.from, to: b.to, q: b.q, ids: b.ids, scoped: b.scoped,
+  }));
+}));
+
 router.get('/summaries/inventory', asyncHandler(async (req, res) => {
   ok(res, await summaries.inventorySummary(await storePk(req)));
 }));
