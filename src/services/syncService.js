@@ -735,7 +735,7 @@ async function upsertSale(client, storePk, doc, hint = null) {
   }
   const meta = syncMeta(doc);
   const existing = await client.query(
-    `SELECT id, version, updated_at, device_id, deleted,
+    `SELECT id, version, updated_at, device_id, deleted, customer_id,
             amount_paid, cash_paid, online_paid, previous_due, previous_credit,
             due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
             total_amount, discount, discount_pct, rounding,
@@ -898,6 +898,16 @@ async function upsertSale(client, storePk, doc, hint = null) {
       await noteCascadeChanges(client, hint, storePk, 'customers', customerId, 'sales', cascaded);
     } catch (e) {
       console.warn('[cascade] customer after sale:', e.message);
+    }
+  }
+  // An edit that moved the bill to another customer: the one it left owes less now.
+  const leftCustomer = Number(prev?.customer_id);
+  if (leftCustomer > 0 && leftCustomer !== customerId) {
+    try {
+      const cascaded = await cascadeCustomerAfterLedgerChange(client, storePk, leftCustomer, hint);
+      await noteCascadeChanges(client, hint, storePk, 'customers', leftCustomer, 'sales', cascaded);
+    } catch (e) {
+      console.warn('[cascade] customer the sale left:', e.message);
     }
   }
   return withStoredSaleNumber({ id: localId, status: 'upserted' }, stored, fyStart);
@@ -1196,6 +1206,18 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
       await noteCascadeChanges(client, hint, storePk, 'suppliers', supplierId, 'purchases', cascaded);
     } catch (e) {
       console.warn('[cascade] supplier after purchase:', e.message);
+    }
+  }
+  // An edit that moved the purchase to another supplier: the one it left is owed less.
+  // Store 4, 6 Oct 2026: purchase 106 went from TULJAI to VINOD and TULJAI's due kept the
+  // Rs 1503 of a bill it no longer had.
+  const leftSupplier = Number(existingRow?.supplier_id);
+  if (leftSupplier > 0 && leftSupplier !== supplierId) {
+    try {
+      const cascaded = await cascadeSupplierAfterLedgerChange(client, storePk, leftSupplier, hint);
+      await noteCascadeChanges(client, hint, storePk, 'suppliers', leftSupplier, 'purchases', cascaded);
+    } catch (e) {
+      console.warn('[cascade] supplier the purchase left:', e.message);
     }
   }
   return withStoredPurchaseNumber({ id: localId, status: 'upserted' }, stored, fyStart);
