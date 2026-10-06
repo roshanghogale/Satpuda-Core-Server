@@ -51,7 +51,10 @@ export default function Stores() {
     }
   }
 
-  const shown = trialsOnly ? stores.filter((s) => s.provisioned_trial) : stores;
+  // Set up from the installer: a store_provisions row (the old trials, and the
+  // main stores the installer makes now, with their 3-day licence).
+  const fromInstaller = (s) => Boolean(s.provisioned_trial || s.trial_device_id);
+  const shown = trialsOnly ? stores.filter(fromInstaller) : stores;
 
   return (
     <>
@@ -67,7 +70,7 @@ export default function Stores() {
               checked={trialsOnly}
               onChange={(e) => setTrialsOnly(e.target.checked)}
             />
-            Trials only
+            From installer only
           </label>
           <button className="btn primary" onClick={() => setShowForm((v) => !v)}>
             {showForm ? 'Cancel' : 'New store'}
@@ -106,11 +109,13 @@ export default function Stores() {
                 <tr key={s.id}>
                   <td>
                     <strong>{s.store_name}</strong>
-                    {s.provisioned_trial && (
+                    {s.provisioned_trial ? (
                       <span className="badge" style={{ marginLeft: 8 }}>TRIAL</span>
-                    )}
+                    ) : s.trial_device_id ? (
+                      <span className="badge" style={{ marginLeft: 8 }}>INSTALLER</span>
+                    ) : null}
                     <div className="muted mono">{s.store_id}</div>
-                    {s.provisioned_trial && s.trial_device_id && (
+                    {s.trial_device_id && (
                       <div className="muted mono" style={{ fontSize: '0.7rem' }}>
                         installer · {s.trial_ip || 'no address'}
                       </div>

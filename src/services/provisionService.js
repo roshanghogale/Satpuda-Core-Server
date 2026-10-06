@@ -172,9 +172,12 @@ function cleanShort(raw, max) {
  */
 function newTrialIdentity() {
   const suffix = crypto.randomBytes(6).toString('hex');
+  // A shop from the installer is a main store now (owner, 6 Oct 2026), so it is no
+  // longer named "trial"; it keeps a random namespace of its own that no
+  // administrator-created store (store_<name>) can share.
   return {
-    store_id: `trial_${suffix}`,
-    store_key: `Trial_${suffix.toUpperCase()}`,
+    store_id: `shop_${suffix}`,
+    store_key: `Shop_${suffix.toUpperCase()}`,
     android_key: generateAndroidKey(),
   };
 }
@@ -232,13 +235,13 @@ export async function assertWithinLimits({ deviceId, machineId, ip }) {
     // human re-open it from the admin panel.
     throw new AppError(
       429,
-      'This computer has already been given a free trial. Please contact Satpuda to continue.',
+      'A shop has already been set up from this computer. Please contact Satpuda to continue.',
     );
   }
   if (Number(r.ip_count) >= TRIAL_LIMITS.perIpPerDay) {
     throw new AppError(
       429,
-      'Too many trials have been started from this internet connection today. Try again tomorrow, or contact Satpuda.',
+      'Too many shops have been set up from this internet connection today. Try again tomorrow, or contact Satpuda.',
     );
   }
   if (Number(r.global_count) >= TRIAL_LIMITS.globalPerHour) {
@@ -247,7 +250,7 @@ export async function assertWithinLimits({ deviceId, machineId, ip }) {
     // the admin panel's Trials page.
     throw new AppError(
       503,
-      'New trials are paused for a short while. Please try again later, or contact Satpuda.',
+      'New shops are paused for a short while. Please try again later, or contact Satpuda.',
     );
   }
 }
@@ -303,7 +306,7 @@ export async function provisionTrial({
         409,
         `A shop called "${requestedName}" is already on Satpuda. If it is your shop, connect this `
           + "computer with the shop's SC- key (Satpuda admin panel, next to the shop) instead of "
-          + 'starting a new trial.',
+          + 'setting up a new shop.',
         { code: 'name_exists' },
       );
     }
@@ -322,6 +325,10 @@ export async function provisionTrial({
         // An INSERT. Not an upsert, not an ON CONFLICT DO UPDATE, not a SELECT
         // first. Every column that decides access is a literal or a server-side
         // value; not one of them comes from the request.
+        //
+        // A MAIN store, not a trial (owner, 6 Oct 2026): nothing to untick in the
+        // admin panel when the shop pays. The 3-day licence is what keeps it in
+        // check -- the owner extends it, or deletes the store once it has run out.
         const { rows } = await client.query(
           `INSERT INTO stores (
              store_id, store_key, store_name, android_key, app_mode, device_role,
@@ -329,7 +336,7 @@ export async function provisionTrial({
              apply_expiry_check, provisioned_trial, notes
            ) VALUES ($1,$2,$3,$4,'online','pc',
              TRUE, $5, TRUE, $6,
-             TRUE, TRUE, $7)
+             TRUE, FALSE, $7)
            RETURNING id, store_id, store_key, store_name, android_key, app_mode,
                      is_active, activation_date, expiry_enabled, expiry_date,
                      apply_expiry_check, provisioned_trial, created_at, updated_at`,
@@ -340,7 +347,8 @@ export async function provisionTrial({
             identity.android_key,
             today,
             expiry,
-            `Self-service ${DEFAULT_EXPIRY_DAYS}-day trial from the installer.`,
+            `New shop from the installer: ${DEFAULT_EXPIRY_DAYS}-day licence. `
+              + 'Extend the expiry when the shop pays, or delete the store.',
           ],
         );
         const store = rows[0];
@@ -373,7 +381,7 @@ export async function provisionTrial({
       throw err;
     }
   }
-  throw new AppError(503, 'Could not start a trial just now. Please try again.');
+  throw new AppError(503, 'Could not set up the shop just now. Please try again.');
 }
 
 /**
