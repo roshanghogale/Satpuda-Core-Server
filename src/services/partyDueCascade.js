@@ -9,7 +9,7 @@ function r2(v) {
 }
 
 /** Cash/online at entry wins over a stored 0 in amount_paid_at_entry. */
-const PURCHASE_ENTRY_PAID_SQL = `
+export const PURCHASE_ENTRY_PAID_SQL = `
   COALESCE(
     NULLIF(COALESCE(cash_paid_at_entry,0) + COALESCE(online_paid_at_entry,0), 0),
     NULLIF(amount_paid_at_entry, 0),

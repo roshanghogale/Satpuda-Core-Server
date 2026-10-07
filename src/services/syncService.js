@@ -48,9 +48,14 @@ import {
   cascadeSupplierAfterLedgerChange,
 } from './partyDueCascade.js';
 
+/** Ids below this are the store's shared (legacy) range, handed out by MAX+1. A device on
+ *  sync v2 makes its own ids from device_no * LEGACY_ID_LIMIT up, so two offline devices
+ *  can never create the same id. Every id in use on 7 Oct 2026 was below 1,000,000. */
+export const LEGACY_ID_LIMIT = 1000000000;
+
 export { shouldAcceptIncoming } from './upsertHelper.js';
 
-function emitSyncHint(hint) {
+export function emitSyncHint(hint) {
   if (!hint?.revisions?.length) return;
   const changes = Array.isArray(hint.changes) ? hint.changes : [];
   broadcastSyncHint(hint.storePk, {
@@ -689,6 +694,18 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
     return answer({ id: localId, status: 'skipped' });
   }
 
+  // The stock ledger must hold every change for the nightly check (stock = snapshot +
+  // ledger). This absolute write (a device pushing stock_qty without stock_ops) never left
+  // a line; it now leaves the same audit-only line the skipped path already wrote.
+  {
+    const prevQty = existing.rows[0] ? Number(existing.rows[0].stock_qty || 0) : 0;
+    const nextQty = Number(doc.stock_qty || 0);
+    if (prevQty !== nextQty) {
+      await recordAbsoluteStockPatch(client, storePk, {
+        medicineId: localId, prevQty, nextQty, deviceId: meta.device_id, hint,
+      });
+    }
+  }
   await client.query(
     `INSERT INTO medicines (
        store_pk, local_id, name, type, stock_qty, unit, gst_percent, mrp, rate,
@@ -1235,7 +1252,8 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
 async function realPaymentLocalId(client, storePk, table, localId) {
   if (Number(localId) > 0) return Number(localId);
   const { rows } = await client.query(
-    `SELECT COALESCE(MAX(local_id),0) AS mx FROM ${table} WHERE store_pk=$1 AND local_id > 0`,
+    `SELECT COALESCE(MAX(local_id),0) AS mx FROM ${table}
+      WHERE store_pk=$1 AND local_id > 0 AND local_id < ${LEGACY_ID_LIMIT}`,
     [storePk]
   );
   const next = Math.max(1, Number(rows[0].mx) + 1);
@@ -1615,6 +1633,7 @@ export async function pushDocs(storePk, collection, docs) {
   if (collection === 'stock_operations') {
     if (!Array.isArray(docs) || !docs.length) return { results: [], upserted: 0, skipped: 0 };
     const out = await withTransaction(async (client) => {
+      await lockStorePush(client, storePk);
       await ensureStoreSyncState(client, storePk);
       const results = [];
       let upserted = 0;
@@ -1672,6 +1691,7 @@ export async function pushDocs(storePk, collection, docs) {
   if (!Array.isArray(docs) || !docs.length) return { results: [], upserted: 0, skipped: 0 };
 
   const out = await withTransaction(async (client) => {
+    await lockStorePush(client, storePk);
     await ensureStoreSyncState(client, storePk);
     if (FLAT_BULK.has(collection)) {
       return pushFlatBulk(client, storePk, collection, docs, hint);
@@ -1703,6 +1723,23 @@ export async function pushDocs(storePk, collection, docs) {
 }
 
 export async function pushBundle(storePk, bundle) {
+  const hint = newSyncHint(storePk);
+  const summary = await withTransaction((client) => applyBundleInTx(client, storePk, bundle, hint));
+  emitSyncHint(hint);
+  return { ...summary, revisions: hint.revisions.slice() };
+}
+
+/** Writes that move stock or ledgers for one store run one at a time (the nightly check
+ *  reads stock and the ledger under the same lock, so it never sees half a push). */
+export async function lockStorePush(client, storePk) {
+  await client.query(`SELECT pg_advisory_xact_lock(4242, $1::int)`, [Number(storePk)]);
+}
+
+/**
+ * Everything pushBundle does, inside the caller's transaction, so a caller (sync v2) can
+ * write its own records in the same transaction: all of it lands, or none of it.
+ */
+export async function applyBundleInTx(client, storePk, bundle, hint) {
   // Masters first, then transactions, then local feature tables
   const order = [
     'customers', 'suppliers', 'medicines', 'doctors',
@@ -1712,8 +1749,8 @@ export async function pushBundle(storePk, bundle) {
     'racks', 'sections', 'boxes', 'shelves', 'medicine_shelf', 'medicine_suppliers',
   ];
   const summary = {};
-  const hint = newSyncHint(storePk);
-  await withTransaction(async (client) => {
+  {
+    await lockStorePush(client, storePk);
     await ensureStoreSyncState(client, storePk);
     const deferredChanges = [];
     const partyRecompute = { customers: new Set(), suppliers: new Set() };
@@ -1815,10 +1852,8 @@ export async function pushBundle(storePk, bundle) {
       }
     }
     await noteAcceptedChangeMany(client, hint, deferredChanges);
-    return summary;
-  });
-  emitSyncHint(hint);
-  return { ...summary, revisions: hint.revisions.slice() };
+  }
+  return summary;
 }
 
 /** Soft-delete one entity and append changelog (operation=delete). */
@@ -2968,7 +3003,53 @@ async function maxExistingFySerial(client, storePk, kind, fy, excludeLocalId = n
     }
     if (Number.isFinite(n)) maxSerial = Math.max(maxSerial, n);
   }
-  return maxSerial;
+  // Numbers a device has reserved in advance (sync v2 number blocks) are taken even
+  // before its bills arrive: the next number handed out anywhere comes after them.
+  return Math.max(maxSerial, await maxReservedSerial(client, storePk, kind, fy));
+}
+
+let _numberBlocksReady = false;
+async function maxReservedSerial(client, storePk, kind, fy) {
+  if (!_numberBlocksReady) {
+    const { rows } = await client.query(`SELECT to_regclass('public.number_blocks') IS NOT NULL AS ok`);
+    if (!rows[0]?.ok) return 0;
+    _numberBlocksReady = true;
+  }
+  const { rows } = await client.query(
+    `SELECT COALESCE(MAX(to_serial), 0) AS m FROM number_blocks
+      WHERE store_pk=$1 AND kind=$2 AND fy_start_year=$3`,
+    [storePk, kind === 'sales' ? 'sales' : 'purchases', Number(fy)],
+  );
+  return Number(rows[0]?.m || 0);
+}
+
+/**
+ * Reserve the next `size` bill (or purchase) numbers of a financial year for one device.
+ * The device prints them while offline; nothing else is ever given a number inside the
+ * block, so two devices never print the same one.
+ */
+export async function reserveNumberBlockInTx(client, storePk, { kind, fyStartYear, deviceNo, size }) {
+  const k = kind === 'sales' ? 'sales' : 'purchases';
+  const fy = Number(fyStartYear);
+  if (!Number.isFinite(fy) || fy < 2000 || fy > 2100) throw new AppError(400, 'fy_start_year required');
+  const n = Math.max(5, Math.min(200, Number(size) || 50));
+  await lockFySeries(client, storePk, k, fy);
+  const top = await maxExistingFySerial(client, storePk, k, fy);
+  const from = top + 1;
+  const to = top + n;
+  await client.query(
+    `INSERT INTO number_blocks (store_pk, kind, fy_start_year, device_no, from_serial, to_serial)
+     VALUES ($1,$2,$3,$4,$5,$6)`,
+    [storePk, k, fy, Number(deviceNo), from, to],
+  );
+  await client.query(
+    `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (store_pk, kind, fy_start_year) DO UPDATE
+       SET last_serial = GREATEST(fy_serials.last_serial, EXCLUDED.last_serial)`,
+    [storePk, k, fy, to],
+  );
+  return { kind: k, fy_start_year: fy, from_serial: from, to_serial: to };
 }
 
 /** Pull FY counter back to the highest live bill after the latest is deleted. */
@@ -3113,7 +3194,11 @@ export async function allocateLocalIds(storePk, requests = []) {
         collection,
       ]);
       const { rows } = await client.query(
-        `SELECT COALESCE(MAX(local_id), 0)::bigint AS mx FROM ${collection} WHERE store_pk = $1`,
+        // Below LEGACY_ID_LIMIT only: ids from there up belong to devices that make their
+        // own (device_no * LEGACY_ID_LIMIT + n, sync v2). MAX over the whole table would
+        // hand out the next id INSIDE such a device's range.
+        `SELECT COALESCE(MAX(local_id), 0)::bigint AS mx FROM ${collection}
+          WHERE store_pk = $1 AND local_id < ${LEGACY_ID_LIMIT}`,
         [storePk]
       );
       // Never hand back a non-positive id. A client that persisted its own

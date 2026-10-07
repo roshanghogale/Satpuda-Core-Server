@@ -11,6 +11,7 @@ import { config } from './config/index.js';
 import { errorMiddleware, trustedClientIp } from './utils/http.js';
 import authRoutes from './routes/auth.js';
 import syncRoutes from './routes/sync.js';
+import syncV2Routes from './routes/syncV2.js';
 import storeQueryRoutes from './routes/storeQuery.js';
 import adminRoutes from './routes/admin.js';
 import masterMedicineRoutes from './routes/masterMedicines.js';
@@ -231,6 +232,8 @@ app.use('/api/provision', provisionLimiter);
 app.use('/api/provision', provisionRoutes);
 
 app.use('/api', authRoutes);
+// Before /api/sync: its /:collection routes would read "v2" as a collection name.
+app.use('/api/sync/v2', syncV2Routes);
 app.use('/api/sync', syncRoutes);
 app.use('/api/store', storeQueryRoutes);
 app.use('/api/master-medicines', masterMedicineRoutes);

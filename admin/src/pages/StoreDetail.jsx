@@ -58,6 +58,112 @@ function normVoiceTier(value) {
  * Server-side guards stay in charge: the SSH switch (two hours), the typed name
  * (never overridable), and "this store still looks active" (force, recorded).
  */
+/**
+ * Offline-first sync health (server: services/nightlyCheck.js, services/syncV2.js):
+ * the nightly stock / dues check, the devices on sync v2, and every device save that was
+ * not simply applied -- flagged (kept, needs a look) or quarantined (could not be applied,
+ * kept whole for repair).
+ */
+function SyncHealthPanel({ store }) {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState('');
+
+  async function load() {
+    setMsg('');
+    try {
+      setData(await api(`/admin/stores/${store.id}/sync-health`));
+    } catch (e) {
+      setMsg(e.message || 'Could not load sync health');
+    }
+  }
+  useEffect(() => { load(); }, [store.id]);
+
+  async function runNow() {
+    setBusy(true);
+    try {
+      await api(`/admin/stores/${store.id}/sync-check`, { method: 'POST' });
+      await load();
+    } catch (e) {
+      setMsg(e.message || 'Check failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resolve(id) {
+    const note = window.prompt('What was done about it? (kept with the flag)') ?? '';
+    try {
+      await api(`/admin/stores/${store.id}/sync-flags/${id}/resolve`, { method: 'POST', body: { note } });
+      await load();
+    } catch (e) {
+      setMsg(e.message || 'Could not resolve');
+    }
+  }
+
+  const last = data?.checks?.runs?.[0];
+  const items = data?.checks?.latest_items || [];
+  const flags = data?.flags || [];
+  const devices = data?.devices || [];
+  return (
+    <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="panel-h" style={{ padding: '0 0 12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ margin: 0 }}>Sync health</h3>
+        <button className="btn sm" disabled={busy} onClick={runNow}>{busy ? 'Checking...' : 'Run check now'}</button>
+      </div>
+      {msg && <div className="error">{msg}</div>}
+      {!data ? <div className="muted">Loading...</div> : (
+        <>
+          <div style={{ fontSize: '0.9rem', marginBottom: 8 }}>
+            {last ? (
+              <>
+                Last check {fmtDate(last.run_at)}{last.baseline ? ' (first run: stock recorded, compared from the next run)' : ''}:{' '}
+                <strong>{last.stock_mismatches}</strong> of {last.stock_checked} stocks and{' '}
+                <strong>{last.dues_mismatches}</strong> of {last.dues_checked} dues differ from their ledgers;{' '}
+                <strong>{flags.length}</strong> open device flag(s).
+              </>
+            ) : 'No check has run yet.'}
+          </div>
+          {items.length > 0 && (
+            <table style={{ marginBottom: 12 }}>
+              <thead><tr><th>Kind</th><th>Item</th><th className="right">Ledger says</th><th className="right">Held</th><th>Detail</th></tr></thead>
+              <tbody>
+                {items.map((it, i) => (
+                  <tr key={i}>
+                    <td>{it.kind}</td><td>{it.label}</td>
+                    <td className="right mono">{it.expected}</td><td className="right mono">{it.actual}</td>
+                    <td className="muted" style={{ fontSize: '0.8rem' }}>{it.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {flags.length > 0 && (
+            <table style={{ marginBottom: 12 }}>
+              <thead><tr><th>When</th><th>Device</th><th>Record</th><th>Outcome</th><th>Why</th><th></th></tr></thead>
+              <tbody>
+                {flags.map((f) => (
+                  <tr key={f.id}>
+                    <td className="mono" style={{ fontSize: '0.8rem' }}>{fmtDate(f.received_at)}</td>
+                    <td>{f.device_name || `device ${f.device_no}`} #{f.seq}</td>
+                    <td className="mono">{f.collection}/{f.local_id ?? '-'} ({f.op})</td>
+                    <td><span className={`badge ${f.outcome === 'quarantined' ? 'off' : ''}`}>{f.outcome}</span></td>
+                    <td style={{ fontSize: '0.8rem' }}>{f.flag_code}: {f.flag_detail}</td>
+                    <td><button className="btn sm" onClick={() => resolve(f.id)}>Resolved</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div className="muted" style={{ fontSize: '0.82rem' }}>
+            Devices on offline-first sync: {devices.length ? devices.map((d) => `${d.device_name || d.device_type || 'device'} #${d.device_no} (saves up to ${d.last_seq}, seen ${fmtDate(d.last_seen_at)})`).join(' · ') : 'none yet'}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function DeleteStorePanel({ store }) {
   const [report, setReport] = useState(null);
   const [typed, setTyped] = useState('');
@@ -630,6 +736,7 @@ export default function StoreDetail() {
       </div>
 
       <AccessControlPanel store={store} onSave={saveAccess} />
+      <SyncHealthPanel store={store} />
       <DeleteStorePanel store={store} />
 
       <div className="tabs">

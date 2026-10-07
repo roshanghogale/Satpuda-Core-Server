@@ -87,7 +87,8 @@ export async function applyStockOperation(client, storePk, doc, hint = null) {
   let localId = Number(doc.id ?? doc.local_id ?? doc.localId ?? 0);
   if (!Number.isFinite(localId) || localId <= 0) {
     const next = await client.query(
-      `SELECT COALESCE(MAX(local_id), 0) + 1 AS n FROM stock_operations WHERE store_pk=$1`,
+      `SELECT COALESCE(MAX(local_id), 0) + 1 AS n FROM stock_operations
+       WHERE store_pk=$1 AND local_id < 1000000000`,
       [storePk],
     );
     localId = Number(next.rows[0]?.n || 1);
@@ -212,10 +213,15 @@ export async function recordAbsoluteStockPatch(client, storePk, {
   void hint;
   const delta = Number(nextQty) - Number(prevQty);
   if (!Number.isFinite(delta) || delta === 0) return null;
-  // Stable uuid so re-pushes of the same absolute transition are idempotent
-  const opUuid = `abs:${storePk}:${medicineId}:${prevQty}->${nextQty}:${deviceId || 'na'}`;
+  // One line per change. The uuid used to be the transition alone (5->3 by this device),
+  // so the same transition a second time -- the next day, the next sale -- was dropped by
+  // ON CONFLICT and the ledger missed it. A re-push of a figure already applied never
+  // reaches here (its delta is 0).
+  const opUuid = `abs:${storePk}:${medicineId}:${prevQty}->${nextQty}:${deviceId || 'na'}:`
+    + `${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
   const next = await client.query(
-    `SELECT COALESCE(MAX(local_id), 0) + 1 AS n FROM stock_operations WHERE store_pk=$1`,
+    `SELECT COALESCE(MAX(local_id), 0) + 1 AS n FROM stock_operations
+       WHERE store_pk=$1 AND local_id < 1000000000`,
     [storePk],
   );
   const localId = Number(next.rows[0]?.n || 1);

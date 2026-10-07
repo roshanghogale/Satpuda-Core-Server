@@ -7,6 +7,8 @@ import * as master from '../services/masterMedicineService.js';
 import * as demoUsers from '../services/demoUserService.js';
 import * as provisions from '../services/provisionService.js';
 import { query } from '../db/pool.js';
+import * as syncV2 from '../services/syncV2.js';
+import { latestChecks, runStoreCheck } from '../services/nightlyCheck.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -48,6 +50,27 @@ router.get('/stores/:id/sync', asyncHandler(async (req, res) => {
   const store = await admin.getStore(req.params.id);
   const { getAdminSyncOverview } = await import('../services/syncRevision.js');
   ok(res, await getAdminSyncOverview(store.id));
+}));
+
+/** Offline-first sync health: the nightly checks, the devices on sync v2, and every device
+ *  event that was not simply applied (flagged or quarantined) and is still open. */
+router.get('/stores/:id/sync-health', asyncHandler(async (req, res) => {
+  const pk = Number(req.params.id);
+  const [checks, devices, flags] = await Promise.all([
+    latestChecks(pk),
+    syncV2.listDevices(pk),
+    syncV2.listFlags(pk, { open: req.query.all !== '1' }),
+  ]);
+  ok(res, { checks, devices, flags });
+}));
+
+/** Run the nightly check for one store now. */
+router.post('/stores/:id/sync-check', asyncHandler(async (req, res) => {
+  ok(res, await runStoreCheck(Number(req.params.id)));
+}));
+
+router.post('/stores/:id/sync-flags/:flagId/resolve', asyncHandler(async (req, res) => {
+  ok(res, await syncV2.resolveFlag(Number(req.params.id), req.params.flagId, (req.body || {}).note));
 }));
 
 router.patch('/stores/:id', asyncHandler(async (req, res) => {

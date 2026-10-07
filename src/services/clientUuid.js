@@ -64,7 +64,8 @@ export async function resolveLocalIdByClientUuid(client, table, storePk, doc, { 
         // medicine showed up twice. persistClientUuid below adopts the uuid.
         if (existingUuid && existingUuid !== clientUuid) {
           const { rows: mx } = await client.query(
-            `SELECT COALESCE(MAX(local_id), 0)::bigint AS mx FROM ${table} WHERE store_pk=$1`,
+            `SELECT COALESCE(MAX(local_id), 0)::bigint AS mx FROM ${table}
+              WHERE store_pk=$1 AND local_id < 1000000000`,
             [storePk],
           );
           localId = Number(mx[0]?.mx || 0) + 1;
