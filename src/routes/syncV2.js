@@ -9,6 +9,7 @@ import {
   registerDevice,
   reserveNumberBlock,
   resolveFlag,
+  stockNow,
 } from '../services/syncV2.js';
 
 /** Offline-first sync v2 (services/syncV2.js). Mounted before /api/sync, whose
@@ -43,6 +44,11 @@ router.post('/push', asyncHandler(async (req, res) => {
 
 router.get('/status', asyncHandler(async (req, res) => {
   ok(res, await deviceStatus(await resolveStorePk(req), req.query.install_id));
+}));
+
+router.post('/stock', asyncHandler(async (req, res) => {
+  const ids = (req.body || {}).ids;
+  ok(res, await stockNow(await resolveStorePk(req), Array.isArray(ids) ? ids : null));
 }));
 
 router.get('/devices', asyncHandler(async (req, res) => {

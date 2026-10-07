@@ -99,8 +99,44 @@ export async function registerDevice(storePk, { installId, deviceType, deviceNam
         [row.id, cleanText(deviceType, 16), cleanText(deviceName, 64), cleanText(appVersion, 32)],
       ));
     }
-    return devicePayload(row);
+    return { ...devicePayload(row), ...(await deviceFloors(client, storePk, Number(row.device_no))) };
   });
+}
+
+/** What this device already used: the highest id it made per collection, and the highest of
+ *  its own document numbers (SR3-17 ...). A reinstalled device carries on after them instead
+ *  of starting again at 1 and colliding with its own earlier records. */
+const DOC_NUMBER_COLUMNS = [
+  ['SR', 'sales_returns', 'return_no'],
+  ['PR', 'purchase_returns', 'return_no'],
+  ['PAY', 'supplier_payments', 'payment_no'],
+  ['SD', 'stock_disposals', 'disposal_no'],
+  ['RO', 'pending_orders', 'order_no'],
+];
+async function deviceFloors(client, storePk, deviceNo) {
+  const lo = deviceNo * LEGACY_ID_LIMIT;
+  const hi = (deviceNo + 1) * LEGACY_ID_LIMIT - 1;
+  const idFloor = {};
+  for (const col of DOC_COLLECTIONS) {
+    const { rows } = await client.query(
+      `SELECT COALESCE(MAX(local_id), 0)::bigint AS m FROM ${col}
+        WHERE store_pk=$1 AND local_id BETWEEN $2 AND $3`,
+      [storePk, lo, hi],
+    );
+    const m = Number(rows[0]?.m || 0);
+    if (m) idFloor[col] = m;
+  }
+  const docFloor = {};
+  for (const [prefix, table, column] of DOC_NUMBER_COLUMNS) {
+    const { rows } = await client.query(
+      `SELECT COALESCE(MAX(NULLIF(substring(${column} from $2), '')::bigint), 0) AS m
+         FROM ${table} WHERE store_pk=$1 AND ${column} LIKE $3`,
+      [storePk, `^${prefix}${deviceNo}-([0-9]+)$`, `${prefix}${deviceNo}-%`],
+    );
+    const m = Number(rows[0]?.m || 0);
+    if (m) docFloor[prefix] = m;
+  }
+  return { id_floor: idFloor, doc_floor: docFloor };
 }
 
 export async function reserveNumberBlock(storePk, { installId, kind, fyStartYear, size } = {}) {
@@ -201,6 +237,13 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
       if (localId >= LEGACY_ID_LIMIT && !own) {
         flags.push(['foreign_id', `new ${ev.collection}/${localId} is outside this device's id range`]);
       }
+    }
+    if (ev.collection === 'medicines') {
+      // Stock moves only through ledger lines (stock events), never through the figure a
+      // device happens to hold: that figure already includes its own unsent movements.
+      doc.stock_qty = stored ? Number(stored.doc?.stock_qty || 0) : 0;
+      delete doc.stock_ops;
+      delete doc.stockOps;
     }
     doc.updated_at = new Date().toISOString();
     doc.device_id = doc.device_id || device.install_id;
@@ -371,6 +414,31 @@ export async function resolveFlag(storePk, id, note) {
   );
   if (!rows[0]) throw new AppError(404, 'Flag not found');
   return rows[0];
+}
+
+/** Current stock (and hidden flag) of the given medicines, or of all of them: a device sets
+ *  its local stock to this plus its own movements the server does not have yet. */
+export async function stockNow(storePk, ids = null) {
+  const list = Array.isArray(ids)
+    ? [...new Set(ids.map(Number).filter((n) => Number.isFinite(n) && n > 0))].slice(0, 20000)
+    : null;
+  const { rows } = list
+    ? await query(
+      `SELECT local_id, stock_qty, is_hidden, version FROM medicines
+        WHERE store_pk=$1 AND local_id = ANY($2::bigint[])`,
+      [storePk, list],
+    )
+    : await query(
+      `SELECT local_id, stock_qty, is_hidden, version FROM medicines WHERE store_pk=$1`,
+      [storePk],
+    );
+  const { rows: head } = await query(
+    `SELECT head_revision FROM store_sync_state WHERE store_pk=$1`, [storePk],
+  );
+  return {
+    head_revision: Number(head[0]?.head_revision || 0),
+    stock: rows.map((r) => [Number(r.local_id), Number(r.stock_qty || 0), r.is_hidden ? 1 : 0]),
+  };
 }
 
 export async function listDevices(storePk) {
