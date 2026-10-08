@@ -136,7 +136,38 @@ async function deviceFloors(client, storePk, deviceNo) {
     const m = Number(rows[0]?.m || 0);
     if (m) docFloor[prefix] = m;
   }
-  return { id_floor: idFloor, doc_floor: docFloor };
+  // Number blocks this device still has numbers left in (current and last year): a
+  // reinstalled device, or one switched on again, carries on in them instead of leaving a
+  // gap of up to a whole block in the shop's bill book. "Used" counts deleted bills too, so
+  // a number is never handed out twice.
+  const openBlocks = [];
+  const { rows: blocks } = await client.query(
+    `SELECT kind, fy_start_year, from_serial, to_serial FROM number_blocks
+      WHERE store_pk=$1 AND device_no=$2
+        AND fy_start_year >= EXTRACT(YEAR FROM NOW() - INTERVAL '3 months')::int - 1
+      ORDER BY kind, fy_start_year, from_serial`,
+    [storePk, deviceNo],
+  );
+  for (const b of blocks) {
+    const table = b.kind === 'sales' ? 'sales' : 'purchases';
+    const dateCol = b.kind === 'sales' ? 'bill_date' : 'purchase_date';
+    const fy = Number(b.fy_start_year);
+    const { rows } = await client.query(
+      `SELECT COALESCE(MAX(fy_serial), 0) AS m FROM ${table}
+        WHERE store_pk=$1 AND fy_serial BETWEEN $2 AND $3
+          AND (fy_start_year = $4 OR (${dateCol} >= $5 AND ${dateCol} <= $6))`,
+      [storePk, b.from_serial, b.to_serial, fy, `${fy}-04-01`, `${fy + 1}-03-31`],
+    );
+    const used = Number(rows[0]?.m || 0);
+    if (used < Number(b.to_serial)) {
+      openBlocks.push({
+        kind: b.kind, fy_start_year: fy,
+        from_serial: Number(b.from_serial), to_serial: Number(b.to_serial),
+        next_serial: Math.max(Number(b.from_serial), used + 1),
+      });
+    }
+  }
+  return { id_floor: idFloor, doc_floor: docFloor, open_blocks: openBlocks };
 }
 
 export async function reserveNumberBlock(storePk, { installId, kind, fyStartYear, size } = {}) {

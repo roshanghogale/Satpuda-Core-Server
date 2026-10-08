@@ -28,7 +28,7 @@ const pair = async (deviceId, type) => (await call(null, 'POST', '/api/auth/pair
   android_key: KEY, device_id: deviceId, device_type: type,
 })).token;
 
-const today = '2026-10-07';
+const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10); // the shop's date (IST)
 const fy = 2026;
 const saleDoc = (id, billNo, customerId, medId, qty, rate) => ({
   id, bill_no: billNo, bill_date: today, customer_id: customerId,
