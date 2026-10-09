@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api, fmtDate, inr } from '../api.js';
+import WebLogins from './WebLogins.jsx';
 
-const TABS = ['Dashboard', 'Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Doctors', 'Payments', 'Returns', 'Settings', 'Devices', 'Sync'];
+const TABS = ['Dashboard', 'Sales', 'Purchases', 'Inventory', 'Customers', 'Suppliers', 'Doctors', 'Payments', 'Returns', 'Settings', 'Devices', 'Sync', 'Web logins'];
 
 function parseMaybeJson(value) {
   if (value == null || value === '') return null;
@@ -646,7 +647,7 @@ export default function StoreDetail() {
   useEffect(() => { loadStore(); }, [id]);
 
   useEffect(() => {
-    if (!data || tab === 'Dashboard' || tab === 'Devices' || tab === 'Sync') return;
+    if (!data || tab === 'Dashboard' || tab === 'Devices' || tab === 'Sync' || tab === 'Web logins') return;
     let cancelled = false;
     (async () => {
       try {
@@ -1009,6 +1010,8 @@ export default function StoreDetail() {
           </div>
         </>
       )}
+
+      {tab === 'Web logins' && data?.store && <WebLogins store={data.store} />}
 
       {tab === 'Devices' && (
         <div className="panel">

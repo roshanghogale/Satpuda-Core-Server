@@ -16,6 +16,7 @@ import storeQueryRoutes from './routes/storeQuery.js';
 import adminRoutes from './routes/admin.js';
 import masterMedicineRoutes from './routes/masterMedicines.js';
 import demoAuthRoutes from './routes/demoAuth.js';
+import webRoutes from './routes/web.js';
 import provisionRoutes, { provisionLimiter } from './routes/provision.js';
 import { consumeDemoEntry, readDemoSession } from './services/demoUserService.js';
 import { attachSyncHub } from './ws/syncHub.js';
@@ -238,6 +239,21 @@ app.use('/api/sync', syncRoutes);
 app.use('/api/store', storeQueryRoutes);
 app.use('/api/master-medicines', masterMedicineRoutes);
 app.use('/api/admin', adminRoutes);
+// The shop's web login (phase 5): online-only, one login per person with their own rights.
+app.use('/api/web', webRoutes);
+
+// The web app itself (built from ../web): served like /admin, index.html never cached so a
+// new build reaches every browser at once.
+const webDist = path.join(__dirname, '../web/dist');
+app.use('/web', express.static(webDist, {
+  setHeaders: (res, p) => { if (p.endsWith('.html')) res.set('Cache-Control', 'no-store'); },
+}));
+app.get(/^\/web(\/.*)?$/, (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.sendFile(path.join(webDist, 'index.html'), (err) => {
+    if (err) res.status(404).json({ ok: false, error: 'Web app not built. Run: npm run web:build' });
+  });
+});
 
 // Serve admin dashboard (built assets under /admin/)
 const adminDist = path.join(__dirname, '../admin/dist');

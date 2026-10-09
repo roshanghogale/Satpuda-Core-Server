@@ -32,6 +32,7 @@ import {
   newSyncHint,
 } from './syncRevision.js';
 import { broadcastSyncHint } from '../ws/syncHub.js';
+import { changedFields, propagateMedicineLines, propagationNote } from './medicineLines.js';
 import {
   resolveLocalIdByClientUuid,
   persistClientUuid,
@@ -586,11 +587,28 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
   const hasStockOps = Array.isArray(doc.stock_ops || doc.stockOps)
     && (doc.stock_ops || doc.stockOps).length > 0;
   const existing = await client.query(
-    `SELECT version, updated_at, device_id, deleted, stock_qty, client_uuid
+    `SELECT version, updated_at, device_id, deleted, stock_qty, client_uuid,
+            name, type, hsn_code, schedule, manufacturer
      FROM medicines WHERE store_pk=$1 AND local_id=$2`,
     [storePk, localId]
   );
   const decision = shouldAcceptIncoming(existing.rows[0], { ...meta });
+  // An accepted edit of a live medicine carries its descriptive fields into its old bill
+  // lines (services/medicineLines.js); prices, GST %, batch and expiry never move.
+  const withLines = async (r) => {
+    const before = existing.rows[0];
+    if (!before || before.deleted || toBool(doc.deleted)) return r;
+    // Only fields the document actually carries: a push that leaves one out must not blank
+    // it on every old bill.
+    const after = {};
+    for (const f of ['name', 'type', 'hsn_code', 'schedule', 'manufacturer']) {
+      if (Object.prototype.hasOwnProperty.call(doc, f)) after[f] = f === 'name' ? String(doc.name || '').toUpperCase() : doc[f];
+    }
+    const changes = changedFields(before, after);
+    if (!Object.keys(changes).length) return r;
+    const counts = await propagateMedicineLines(client, storePk, localId, changes);
+    return { ...r, lines_updated: counts, lines_note: propagationNote(counts) };
+  };
   // B4.2: prefer stock_ops deltas over absolute LWW when provided.
   if (hasStockOps) {
     if (decision !== 'skip') {
@@ -640,7 +658,8 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
     }
     const applied = await applyEmbeddedStockOps(client, storePk, { ...doc, id: localId }, hint);
     await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
-    return answer({ id: localId, status: applied || decision !== 'skip' ? 'upserted' : 'skipped' });
+    const r = answer({ id: localId, status: applied || decision !== 'skip' ? 'upserted' : 'skipped' });
+    return decision !== 'skip' ? withLines(r) : r;
   }
 
   // When LWW skips but stock_qty changed — e.g. an Android sale decreased stock
@@ -740,7 +759,7 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
       clientUuid,
     ]
   );
-  return answer({ id: localId, status: 'upserted' });
+  return withLines(answer({ id: localId, status: 'upserted' }));
 }
 
 async function upsertSale(client, storePk, doc, hint = null) {
@@ -3127,31 +3146,35 @@ async function serialWhenMissing(client, storePk, kind, fy, excludeLocalId) {
 }
 
 export async function allocateFySerial(storePk, kind, dateValue) {
+  return withTransaction((client) => allocateFySerialInTx(client, storePk, kind, dateValue));
+}
+
+/** The same allocation inside a caller's transaction (the web saves a bill and takes its
+ *  number in one transaction, so a refused save never spends a number). */
+export async function allocateFySerialInTx(client, storePk, kind, dateValue) {
   const fy = fyStartYearForDate(dateValue);
-  return withTransaction(async (client) => {
-    await lockFySeries(client, storePk, kind, fy);
-    const dataMax = await maxExistingFySerial(client, storePk, kind, fy);
-    // Next number is max(LIVE bills)+1, so deleting the latest bill hands its
-    // number straight back to the next one. Safe only with the partial indexes.
-    await client.query(
-      `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (store_pk, kind, fy_start_year) DO UPDATE
-         SET last_serial = EXCLUDED.last_serial`,
-      [storePk, kind, fy, dataMax]
-    );
-    const { rows } = await client.query(
-      `UPDATE fy_serials SET last_serial = last_serial + 1
-       WHERE store_pk=$1 AND kind=$2 AND fy_start_year=$3
-       RETURNING last_serial`,
-      [storePk, kind, fy]
-    );
-    const serial = rows[0].last_serial;
-    if (kind === 'sales') {
-      return { fy_start_year: fy, fy_serial: serial, bill_no: encodeSalesBillNo(serial, fy), display_bill_no: `SCB${serial}`, fy_label: fyLabel(fy) };
-    }
-    return { fy_start_year: fy, fy_serial: serial, purchase_no: encodePurchaseNo(serial, fy), display_purchase_no: String(serial), fy_label: fyLabel(fy) };
-  });
+  await lockFySeries(client, storePk, kind, fy);
+  const dataMax = await maxExistingFySerial(client, storePk, kind, fy);
+  // Next number is max(LIVE bills)+1, so deleting the latest bill hands its
+  // number straight back to the next one. Safe only with the partial indexes.
+  await client.query(
+    `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (store_pk, kind, fy_start_year) DO UPDATE
+       SET last_serial = EXCLUDED.last_serial`,
+    [storePk, kind, fy, dataMax]
+  );
+  const { rows } = await client.query(
+    `UPDATE fy_serials SET last_serial = last_serial + 1
+     WHERE store_pk=$1 AND kind=$2 AND fy_start_year=$3
+     RETURNING last_serial`,
+    [storePk, kind, fy]
+  );
+  const serial = rows[0].last_serial;
+  if (kind === 'sales') {
+    return { fy_start_year: fy, fy_serial: serial, bill_no: encodeSalesBillNo(serial, fy), display_bill_no: `SCB${serial}`, fy_label: fyLabel(fy) };
+  }
+  return { fy_start_year: fy, fy_serial: serial, purchase_no: encodePurchaseNo(serial, fy), display_purchase_no: String(serial), fy_label: fyLabel(fy) };
 }
 
 /** Allocate next local_id values per collection (server-only clients, no SQLite autoincrement). */

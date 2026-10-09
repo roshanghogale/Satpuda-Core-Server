@@ -5,6 +5,7 @@ import { requireAdmin } from '../middleware/auth.js';
 import * as admin from '../services/adminService.js';
 import * as master from '../services/masterMedicineService.js';
 import * as demoUsers from '../services/demoUserService.js';
+import * as webUsers from '../services/webUsers.js';
 import * as provisions from '../services/provisionService.js';
 import { query } from '../db/pool.js';
 import * as syncV2 from '../services/syncV2.js';
@@ -377,6 +378,70 @@ router.patch('/demo-users/:id', asyncHandler(async (req, res) => {
 
 router.delete('/demo-users/:id', asyncHandler(async (req, res) => {
   ok(res, await demoUsers.deleteDemoUser(req.params.id));
+}));
+
+// ─── Web logins of a store (phase 5) ──────────────────────────────────────────
+// The admin creates the store OWNER login and staff logins. A generated password is in the
+// answer ONCE, to hand over; only its scrypt hash is kept, and the login sets its own
+// password at first sign-in.
+
+async function storePkOf(idParam) {
+  return (await admin.getStore(idParam)).id;
+}
+
+function adminActor(req) {
+  return `admin:${req.auth?.username || req.auth?.adminId || ''}`;
+}
+
+router.get('/web-permissions', (_req, res) => {
+  ok(res, { permissions: webUsers.PERMISSIONS, default_staff: webUsers.DEFAULT_STAFF_PERMISSIONS });
+});
+
+router.get('/stores/:id/web-users', asyncHandler(async (req, res) => {
+  ok(res, await webUsers.listUsers(await storePkOf(req.params.id)));
+}));
+
+router.post('/stores/:id/web-users', asyncHandler(async (req, res) => {
+  const pk = await storePkOf(req.params.id);
+  const out = await webUsers.createUser(pk, req.body || {}, { actor: adminActor(req) });
+  await webUsers.audit(null, {
+    storePk: pk, user: null, action: 'staff.add',
+    detail: { by: adminActor(req), username: out.user.username, role: out.user.role },
+  });
+  ok(res, out);
+}));
+
+router.patch('/stores/:id/web-users/:userId', asyncHandler(async (req, res) => {
+  const pk = await storePkOf(req.params.id);
+  const user = await webUsers.updateUser(pk, req.params.userId, req.body || {});
+  await webUsers.audit(null, {
+    storePk: pk, user: null, action: 'staff.change',
+    detail: { by: adminActor(req), username: user.username, change: req.body || {} },
+  });
+  ok(res, user);
+}));
+
+router.post('/stores/:id/web-users/:userId/reset-password', asyncHandler(async (req, res) => {
+  const pk = await storePkOf(req.params.id);
+  const out = await webUsers.resetPassword(pk, req.params.userId, {});
+  await webUsers.audit(null, {
+    storePk: pk, user: null, action: 'staff.reset_password',
+    detail: { by: adminActor(req), username: out.user.username },
+  });
+  ok(res, out);
+}));
+
+router.delete('/stores/:id/web-users/:userId', asyncHandler(async (req, res) => {
+  const pk = await storePkOf(req.params.id);
+  const out = await webUsers.deleteUser(pk, req.params.userId);
+  await webUsers.audit(null, {
+    storePk: pk, user: null, action: 'staff.delete', detail: { by: adminActor(req), username: out.username },
+  });
+  ok(res, out);
+}));
+
+router.get('/stores/:id/web-audit', asyncHandler(async (req, res) => {
+  ok(res, await webUsers.listAudit(await storePkOf(req.params.id), req.query));
 }));
 
 // ─── Global master medicines ──────────────────────────────────────────────────

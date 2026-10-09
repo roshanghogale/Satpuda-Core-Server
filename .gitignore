@@ -25,3 +25,6 @@ secrets/
 *-test.mjs
 _verify_*.js
 firebase_import_report.json
+
+# Web login app build (built on deploy, like admin/dist)
+web/dist/

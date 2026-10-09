@@ -12,7 +12,10 @@
     "db:verify": "node src/db/verify.js",
     "admin:build": "cd admin && npm run build",
     "admin:dev": "cd admin && npm run dev",
-    "setup": "npm install && node src/db/migrate.js && node src/db/seed.js && node src/db/verify.js"
+    "setup": "npm install && node src/db/migrate.js && node src/db/seed.js && node src/db/verify.js",
+    "web:build": "cd web && npm run build",
+    "web:dev": "cd web && npm run dev",
+    "test:rules": "node test/billRules.test.mjs"
   },
   "engines": {
     "node": ">=20"

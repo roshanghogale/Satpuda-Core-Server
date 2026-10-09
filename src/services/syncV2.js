@@ -396,6 +396,91 @@ export async function pushEvents(storePk, { installId, events } = {}) {
   return { ...out, revisions: hint.revisions.slice() };
 }
 
+/**
+ * A save made ON the server for a device that has no outbox of its own: the web login.
+ *
+ * The web is online-only, so it never queues anything; but its saves must follow exactly the
+ * rules every PC and phone save follows. So the store's web is one more registered device
+ * (install id `web-store-<pk>`), and each web save becomes that device's next event: the same
+ * applyEvent (bundle rules, stock only through stock operations, dues cascade, sync revision
+ * so PCs and phones pull it) and the same device_events record kept for ever.
+ *
+ * `build(client, device, helpers)` runs inside the transaction, under the store's push lock,
+ * and returns the events to apply in order: [{ op, collection, doc, stock_ops, base_version }].
+ * helpers.nextId(collection) hands out the web device's own ids (device_no * 1e9 + n), so a
+ * web bill can never take an id a PC or phone made offline.
+ *
+ * All or nothing: a quarantined event rolls the whole save back and the caller gets the reason.
+ */
+export async function applyServerSideSave(storePk, { installId, deviceType = 'web', deviceName = 'Web login', appVersion = null, build }) {
+  await registerDevice(storePk, { installId, deviceType, deviceName, appVersion });
+  const hint = newSyncHint(storePk);
+  const out = await withTransaction(async (client) => {
+    await lockStorePush(client, storePk);
+    await ensureStoreSyncState(client, storePk);
+    const { rows } = await client.query(
+      `SELECT * FROM sync_devices WHERE store_pk=$1 AND install_id=$2 FOR UPDATE`, [storePk, installId],
+    );
+    const dev = rows[0];
+    const device = { ...dev, ...devicePayload(dev) };
+    const used = new Map();
+    const nextId = async (collection) => {
+      if (!DOC_COLLECTIONS.has(collection)) throw new AppError(400, `unknown collection ${collection}`);
+      let cur = used.get(collection);
+      if (cur == null) {
+        const { rows: mx } = await client.query(
+          `SELECT COALESCE(MAX(local_id), $2::bigint) AS m FROM ${collection}
+            WHERE store_pk=$1 AND local_id BETWEEN $2 AND $3`,
+          [storePk, device.id_base, device.id_max],
+        );
+        cur = Number(mx[0].m);
+      }
+      cur += 1;
+      used.set(collection, cur);
+      return cur;
+    };
+    const events = await build(client, device, { nextId });
+    let last = Number(dev.last_seq || 0);
+    const results = [];
+    for (const raw of events) {
+      last += 1;
+      const ev = normalizeEvent({
+        ...raw,
+        seq: last,
+        event_uuid: raw.event_uuid || `${installId}:${last}:${Date.now().toString(36)}`,
+        device_time: new Date().toISOString(),
+      });
+      let deleteBase = null;
+      if (ev.op === 'delete' && ev.local_id > 0) {
+        const { rows: cur } = await client.query(
+          `SELECT local_id FROM ${ev.collection} WHERE store_pk=$1 AND local_id=$2`, [storePk, ev.local_id],
+        );
+        if (cur[0]) [deleteBase] = await fetchDocsByLocalIds(storePk, ev.collection, [ev.local_id]);
+      }
+      const r = await applyEvent(client, storePk, device, ev, hint, deleteBase);
+      if (r.outcome === 'quarantined' || (r.flag_code || '').includes('not_applied')) {
+        throw new AppError(409, `Not saved: ${r.flag_detail || r.flag_code || 'the server refused it'}`);
+      }
+      await client.query(
+        `INSERT INTO device_events (
+           store_pk, device_no, seq, event_uuid, collection, op, local_id, base_version,
+           payload, outcome, flag_code, flag_detail, replaced_doc, device_time
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [
+          storePk, dev.device_no, ev.seq, ev.event_uuid, ev.collection, ev.op, ev.local_id,
+          ev.base_version, JSON.stringify(ev.raw), r.outcome, r.flag_code || null,
+          r.flag_detail || null, r.replaced ? JSON.stringify(r.replaced) : null, new Date(),
+        ],
+      );
+      results.push({ collection: ev.collection, local_id: ev.local_id, outcome: r.outcome, flag_code: r.flag_code || null, result: r.result || null });
+    }
+    await client.query(`UPDATE sync_devices SET last_seq=$2, last_seen_at=NOW() WHERE id=$1`, [dev.id, last]);
+    return { results };
+  });
+  emitSyncHint(hint);
+  return out;
+}
+
 /** What the server holds from this device: the "sent / held" proof on the device's screen. */
 export async function deviceStatus(storePk, installId) {
   const dev = await deviceRow(storePk, installId);
