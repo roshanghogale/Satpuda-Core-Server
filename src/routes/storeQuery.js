@@ -9,6 +9,7 @@ import * as admin from '../services/adminService.js';
 import * as summaries from '../services/storeSummaries.js';
 import { boolOrNull } from '../services/adminFilters.js';
 import { query } from '../db/pool.js';
+import { inventoryCounts } from '../services/webStore.js';
 
 const router = Router();
 router.use(requireStore);
@@ -119,6 +120,12 @@ router.get('/purchases', asyncHandler(async (req, res) => {
 
 router.get('/purchases/:localId', asyncHandler(async (req, res) => {
   ok(res, await admin.getPurchaseDetail(await storePk(req), Number(req.params.localId)));
+}));
+
+/** How many medicines each Inventory view holds: active / hidden / out_of_stock / expired /
+ *  all (owner, 9 Oct 2026). Same rules as /inventory's hidden, stock=out and expiry=expired. */
+router.get('/inventory/counts', asyncHandler(async (req, res) => {
+  ok(res, await inventoryCounts(await storePk(req)));
 }));
 
 router.get('/inventory', asyncHandler(async (req, res) => {

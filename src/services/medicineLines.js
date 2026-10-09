@@ -36,6 +36,13 @@ const PARENT = {
   purchase_return_items: 'return_id',
 };
 
+const HEADER = {
+  sales_items: 'sales',
+  purchase_items: 'purchases',
+  sales_return_items: 'sales_returns',
+  purchase_return_items: 'purchase_returns',
+};
+
 export const PROPAGATED_FIELDS = Object.keys(FIELDS);
 
 function norm(v) {
@@ -80,12 +87,14 @@ export async function propagateMedicineLines(client, storePk, medicineId, change
       differs.push(`${col} IS DISTINCT FROM $${params.length}`);
     }
     if (!sets.length) continue;
+    // Deleted bills' lines follow too (harmless), but only live bills are counted for the note.
     const { rows } = await client.query(
       `WITH upd AS (
          UPDATE ${table} SET ${sets.join(', ')}
           WHERE store_pk=$1 AND medicine_id=$2 AND (${differs.join(' OR ')})
           RETURNING ${PARENT[table]} AS parent
-       ) SELECT COUNT(DISTINCT parent)::int AS n FROM upd`,
+       ) SELECT COUNT(DISTINCT upd.parent)::int AS n
+           FROM upd JOIN ${HEADER[table]} h ON h.id = upd.parent WHERE NOT h.deleted`,
       params,
     );
     counts[label[table]] = Number(rows[0]?.n || 0);
