@@ -43,7 +43,7 @@ function EditDialog({ med, onClose, onSaved }) {
           {field('content_drug', 'Content / drug')}{field('location', 'Rack / location')}
           <label className="check"><input type="checkbox" checked={f.is_hidden} onChange={set('is_hidden')} /> Hidden</label>
         </div>
-        <p className="muted small">Name, type, HSN, schedule and company also change on this medicine's old bills (so a new schedule shows in the schedule register). Prices and GST on old bills never change.</p>
+        <p className="muted small">Name, type, HSN, schedule, company, GST %, batch and expiry also change on this medicine's old bills (a new schedule shows in the schedule register; a new GST % changes old sales' GST split). Rates, MRP and amounts on old bills never change.</p>
         {error && <div className="error">{error}</div>}
         <div className="row end"><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={busy} onClick={save}>Save</button></div>
       </div>

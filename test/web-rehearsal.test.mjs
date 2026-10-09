@@ -154,6 +154,21 @@ assert.equal(blank.note, '', 'a price edit touches no old line');
 assert.equal((await okCall('GET', `/api/web/sales/${sale.id}`, { token: owner })).items.find((i) => i.medicine_id === para.id).rate, 3.5);
 step('an MRP edit does not re-price old bills');
 
+// Owner, 9 Oct 2026: GST %, batch and expiry follow the medicine too; amounts never change.
+const purBefore = await okCall('GET', `/api/web/purchases/${pur.id}`, { token: owner });
+const gstEdit = await okCall('PUT', `/api/web/inventory/${para.id}`, { token: owner, body: { gst_percent: 5, batch_no: 'B1X', expiry_date: '11/28' } });
+assert.match(gstEdit.note, /^GST %, Batch, Expiry changed: 1 old sale, 1 purchase updated$/);
+const saleGst = (await okCall('GET', `/api/web/sales/${sale.id}`, { token: owner })).items.find((i) => i.medicine_id === para.id);
+assert.deepEqual([saleGst.gst_percent, saleGst.batch_no, String(saleGst.expiry_date).slice(0, 10), saleGst.rate, saleGst.amount],
+  [5, 'B1X', '2028-11-01', 3.5, 70]);
+const purLine = (await okCall('GET', `/api/web/purchases/${pur.id}`, { token: owner })).items.find((i) => i.medicine_id === para.id);
+const purLine0 = purBefore.items.find((i) => i.medicine_id === para.id);
+assert.deepEqual([purLine.gst_pct, purLine.batch_no, purLine.gst_amt, purLine.taxable, purLine.item_amount],
+  [5, 'B1X', purLine0.gst_amt, purLine0.taxable, purLine0.item_amount]);
+const noBlank = await okCall('PUT', `/api/web/inventory/${para.id}`, { token: owner, body: { batch_no: '' } });
+assert.equal((await okCall('GET', `/api/web/sales/${sale.id}`, { token: owner })).items.find((i) => i.medicine_id === para.id).batch_no, 'B1X');
+step(`GST %, batch and expiry flow into old lines (${gstEdit.note}); amounts as billed; a blank batch blanks no old line (${noBlank.note || 'no note'})`);
+
 // ── a scheduled medicine now needs a doctor ──────────────────────────────────
 const noDoc = await call('POST', '/api/web/sales', { token: staff, body: { customer_name: 'Y', items: [{ medicine_id: para.id, qty: 1 }] } });
 assert.equal(noDoc.status, 400);
@@ -175,6 +190,17 @@ const sup = (await okCall('GET', `/api/web/suppliers?q=${encodeURIComponent(`WEB
 const sp = await okCall('POST', '/api/web/payments/suppliers', { token: owner, body: { supplier_id: sup.id, amount: 100, mode: 'online' } });
 assert.match(sp.payment_no, /^PAY\d+-\d+$/);
 step(`supplier payment ${sp.payment_no}`);
+
+// Walk-in (owner, 9 Oct 2026): no customer name = the shop's COUNTER SALE customer, paid in full.
+const walk = await okCall('POST', '/api/web/sales', { token: staff, body: { items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 80 } });
+assert.equal(walk.sale.customer_name, 'COUNTER SALE');
+assert.equal(walk.sale.due_amount, 0);
+const walkDue = await call('POST', '/api/web/sales', { token: staff, body: { items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 0 } });
+assert.equal(walkDue.status, 400);
+const walkSched = await call('POST', '/api/web/sales', { token: staff, body: { doctor_name: 'DR X', items: [{ medicine_id: para.id, qty: 1 }], cash_paid: 10 } });
+assert.equal(walkSched.status, 400, 'a scheduled medicine still needs a real customer name');
+await okCall('DELETE', `/api/web/sales/${walk.id}`, { token: owner });
+step(`walk-in bill ${walk.bill_no} goes to COUNTER SALE; unpaid walk-in and scheduled walk-in refused`);
 
 // ── inventory views and counts ───────────────────────────────────────────────
 await okCall('PUT', `/api/web/inventory/${syr.id}`, { token: owner, body: { is_hidden: true } });

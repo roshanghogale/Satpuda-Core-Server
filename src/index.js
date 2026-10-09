@@ -70,6 +70,9 @@ const syncLimiter = rateLimit({
 // hostname when a Cloudflare tunnel public hostname points here -- so the link
 // a sales person hands out is just the domain, with no path.
 const DEMO_HOSTS = new Set(['demo.satpudacore.online']);
+// The shops' web login on its own address (Cloudflare tunnel public hostname -> this port).
+// Its root opens the web app; /api and /web are served as on every other hostname.
+const WEB_HOSTS = new Set(['medical.satpudacore.online']);
 // The root-relative build (--base=/), not the /demo/ one: at the root of
 // this hostname the HTML must ask for /assets/*, not /demo/assets/*.
 const demoDistRoot = '/var/www/satpuda-demo';
@@ -162,6 +165,11 @@ function demoSignInRequired(req, res) {
 
 app.use((req, res, next) => {
   const host = String(req.hostname || '').toLowerCase();
+  if (WEB_HOSTS.has(host) && (req.path === '/' || req.path === '/index.html')) return res.redirect(302, '/web/');
+  // The vendor panel is not offered on the shops' address.
+  if (WEB_HOSTS.has(host) && (req.path === '/admin' || req.path.startsWith('/admin/'))) {
+    return res.status(404).json({ ok: false, error: 'Not found' });
+  }
   if (!DEMO_HOSTS.has(host)) return next();
   // The demo answers every /api/ call inside the browser, so nothing on this
   // hostname has any business reaching the store API or the database.

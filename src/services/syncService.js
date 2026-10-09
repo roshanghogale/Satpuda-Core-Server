@@ -32,7 +32,7 @@ import {
   newSyncHint,
 } from './syncRevision.js';
 import { broadcastSyncHint } from '../ws/syncHub.js';
-import { changedFields, propagateMedicineLines, propagationNote } from './medicineLines.js';
+import { PROPAGATED_FIELDS, changedFields, propagateMedicineLines, propagationNote } from './medicineLines.js';
 import {
   resolveLocalIdByClientUuid,
   persistClientUuid,
@@ -588,7 +588,7 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
     && (doc.stock_ops || doc.stockOps).length > 0;
   const existing = await client.query(
     `SELECT version, updated_at, device_id, deleted, stock_qty, client_uuid,
-            name, type, hsn_code, schedule, manufacturer
+            name, type, hsn_code, schedule, manufacturer, gst_percent, batch_no, expiry_date
      FROM medicines WHERE store_pk=$1 AND local_id=$2`,
     [storePk, localId]
   );
@@ -601,8 +601,11 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
     // Only fields the document actually carries: a push that leaves one out must not blank
     // it on every old bill.
     const after = {};
-    for (const f of ['name', 'type', 'hsn_code', 'schedule', 'manufacturer']) {
-      if (Object.prototype.hasOwnProperty.call(doc, f)) after[f] = f === 'name' ? String(doc.name || '').toUpperCase() : doc[f];
+    for (const f of PROPAGATED_FIELDS) {
+      if (!Object.prototype.hasOwnProperty.call(doc, f)) continue;
+      if (f === 'name') after[f] = String(doc.name || '').toUpperCase();
+      else if (f === 'expiry_date') after[f] = parseDateOnly(doc.expiry_date);
+      else after[f] = doc[f];
     }
     const changes = changedFields(before, after);
     if (!Object.keys(changes).length) return r;

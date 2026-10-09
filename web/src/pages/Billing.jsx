@@ -110,7 +110,7 @@ export default function Billing({ me }) {
       <div className="card">
         <h2>{id ? 'Edit bill' : 'New bill'} <span className="muted small">{me.today}</span></h2>
         <div className="grid3">
-          <label>Customer<PartyPicker kind="customers" value={customer} onChange={setCustomer} placeholder="Customer name" /></label>
+          <label>Customer<PartyPicker kind="customers" value={customer} onChange={setCustomer} placeholder="Empty = walk-in (paid in full)" /></label>
           <label>Phone<input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder={customer.id ? 'saved' : 'new customer only'} /></label>
           <label>Doctor<input value={doctor} onChange={(e) => setDoctor(e.target.value)} placeholder="needed for scheduled medicine" /></label>
         </div>

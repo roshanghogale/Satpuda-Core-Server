@@ -285,19 +285,35 @@ async function partyRow(client, table, storePk, id) {
 }
 
 /** The customer of a bill: by id, else by exact name, else a new one (an event of its own). */
+const COUNTER_SALE = 'COUNTER SALE';
+const COUNTER_SALE_NAMES = ['COUNTER SALE', 'COUNTER', 'COUNTER SALES', 'COUNTERSALE', 'COUNTERSALES'];
+
+/** A walk-in bill is paid in full: there is nobody to collect a due from. */
+function walkInPaid(cust, payment) {
+  if (cust.walk_in && Number(payment.due_amount) > 0) {
+    throw new AppError(400, 'A bill without a customer name must be paid in full. Enter the customer name to keep a due.');
+  }
+}
+
 async function resolveCustomer(client, storePk, { customer_id, customer_name, customer_phone, customer_address }, nextId, events) {
   if (Number(customer_id) > 0) {
     const row = await partyRow(client, 'customers', storePk, customer_id);
     if (!row) throw new AppError(400, 'That customer no longer exists. Pick again.');
-    return row;
+    return { ...row, walk_in: COUNTER_SALE_NAMES.includes(String(row.name || '').trim().toUpperCase()) };
   }
-  const name = cleanText(customer_name, 80).toUpperCase();
-  if (!name) throw new AppError(400, 'Enter the customer name.');
+  // No name: a walk-in, billed to the shop's COUNTER SALE customer like the PC does
+  // (core/customer_service.py COUNTER_SALE and its aliases). Owner, 9 Oct 2026.
+  const walkIn = !cleanText(customer_name, 80);
+  const name = walkIn ? COUNTER_SALE : cleanText(customer_name, 80).toUpperCase();
   const { rows } = await client.query(
-    `SELECT * FROM customers WHERE store_pk=$1 AND NOT deleted AND UPPER(BTRIM(name))=$2
-      ORDER BY local_id LIMIT 1`, [storePk, name],
+    walkIn
+      ? `SELECT * FROM customers WHERE store_pk=$1 AND NOT deleted AND UPPER(BTRIM(name)) = ANY($2::text[])
+          ORDER BY (UPPER(BTRIM(name))='COUNTER SALE') DESC, local_id LIMIT 1`
+      : `SELECT * FROM customers WHERE store_pk=$1 AND NOT deleted AND UPPER(BTRIM(name))=$2
+          ORDER BY local_id LIMIT 1`,
+    [storePk, walkIn ? COUNTER_SALE_NAMES : name],
   );
-  if (rows[0]) return rows[0];
+  if (rows[0]) return { ...rows[0], walk_in: walkIn };
   const id = await nextId('customers');
   const doc = {
     id, local_id: id, name, phone: cleanText(customer_phone, 20) || null,
@@ -305,7 +321,7 @@ async function resolveCustomer(client, storePk, { customer_id, customer_name, cu
     created_at: new Date().toISOString(),
   };
   events.push({ op: 'upsert', collection: 'customers', doc });
-  return { local_id: id, name, phone: doc.phone, address: doc.address, total_due: 0, total_credit: 0 };
+  return { local_id: id, name, phone: doc.phone, address: doc.address, total_due: 0, total_credit: 0, walk_in: walkIn };
 }
 
 async function resolveSupplier(client, storePk, { supplier_id, supplier_name, supplier_phone, supplier_gstin }, nextId, events) {
@@ -426,11 +442,13 @@ export async function createSale(storePk, user, body) {
     const { lines, want } = saleLines(body, meds, billDate);
     const doctor = cleanText(body.doctor_name, 80).toUpperCase();
     const cust = await resolveCustomer(client, storePk, body, nextId, events);
-    scheduleChecks(lines, cust.name, doctor);
-    const prevDue = r2(Number(cust.total_due || 0));
-    const prevCredit = r2(Number(cust.total_credit || 0));
+    scheduleChecks(lines, cust.walk_in ? '' : cust.name, doctor);
+    // A walk-in carries no old balance onto its bill.
+    const prevDue = cust.walk_in ? 0 : r2(Number(cust.total_due || 0));
+    const prevCredit = cust.walk_in ? 0 : r2(Number(cust.total_credit || 0));
     const calc = salesCalc({ items: lines, discount_pct: body.discount_pct, cash_paid: body.cash_paid,
       online_paid: body.online_paid, previous_due: prevDue, previous_credit: prevCredit, payment_mode: body.payment_mode });
+    walkInPaid(cust, calc.payment);
     const num = await allocateFySerialInTx(client, storePk, 'sales', billDate);
     const id = await nextId('sales');
     const cu = `web-${randomUUID()}`;
@@ -489,11 +507,12 @@ export async function editSale(storePk, user, id, body) {
       customer_id: body.customer_id ?? old.customer_id, customer_name: body.customer_name,
       customer_phone: body.customer_phone, customer_address: body.customer_address,
     }, nextId, events);
-    scheduleChecks(lines, cust.name, doctor);
+    scheduleChecks(lines, cust.walk_in ? '' : cust.name, doctor);
     const prevDue = Number(cust.local_id) === Number(old.customer_id) ? r2(Number(old.previous_due || 0)) : r2(Number(cust.total_due || 0));
     const prevCredit = Number(cust.local_id) === Number(old.customer_id) ? r2(Number(old.previous_credit || 0)) : r2(Number(cust.total_credit || 0));
     const calc = salesCalc({ items: lines, discount_pct: body.discount_pct, cash_paid: body.cash_paid,
       online_paid: body.online_paid, previous_due: prevDue, previous_credit: prevCredit, payment_mode: body.payment_mode });
+    walkInPaid(cust, calc.payment);
     const ver = Number(old.version || 1) + 1;
     const cu = old.client_uuid || `sale-${id}`;
     const p = calc.payment;
