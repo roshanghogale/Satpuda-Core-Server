@@ -844,6 +844,56 @@ function payAmounts(body) {
   return { amount, mode };
 }
 
+/**
+ * What is open on one bill, for the pay box in Sales / Purchase History (owner, 12 Oct 2026):
+ * this bill's due, the party's older bills' dues and what clears this bill. Payments clear a
+ * party's OLDEST bill first (partyDueCascade.js), so clearing a newer bill takes the older dues
+ * too. total_due on each row is the cascaded remainder.
+ */
+export async function billDueInfo(storePk, kind, id) {
+  const sale = kind === 'sale';
+  const t = sale ? 'sales' : 'purchases';
+  const pcol = sale ? 'customer_id' : 'supplier_id';
+  const dcol = sale ? 'bill_date' : 'purchase_date';
+  const ncol = sale ? 'bill_no' : 'purchase_no';
+  const ptable = sale ? 'customers' : 'suppliers';
+  const { rows } = await query(
+    `SELECT local_id, ${ncol} AS no, ${dcol}::text AS d, ${pcol} AS party_id, COALESCE(total_due,0)::float AS due
+       FROM ${t} WHERE store_pk=$1 AND local_id=$2 AND NOT deleted AND NOT COALESCE(is_autosave,false)`,
+    [storePk, Number(id)],
+  );
+  const b = rows[0];
+  if (!b) throw new AppError(404, 'Bill not found.');
+  const { rows: pr } = await query(
+    `SELECT local_id, name, COALESCE(total_due,0)::float AS due FROM ${ptable}
+      WHERE store_pk=$1 AND local_id=$2 AND NOT deleted`,
+    [storePk, Number(b.party_id)],
+  );
+  const party = pr[0];
+  if (!party) throw new AppError(400, `This bill has no ${sale ? 'customer' : 'supplier'} to take a payment from.`);
+  const { rows: older } = await query(
+    `SELECT COALESCE(SUM(total_due),0)::float AS due FROM ${t}
+      WHERE store_pk=$1 AND ${pcol}=$2 AND NOT deleted AND NOT COALESCE(is_autosave,false)
+        AND (${dcol} < $3::date OR (${dcol} = $3::date AND local_id < $4))`,
+    [storePk, Number(b.party_id), String(b.d).slice(0, 10), Number(b.local_id)],
+  );
+  const billDue = r2(b.due);
+  const olderDue = r2(older[0]?.due || 0);
+  return {
+    kind,
+    bill_id: Number(b.local_id),
+    bill_no: b.no,
+    bill_date: String(b.d).slice(0, 10),
+    party_kind: sale ? 'customer' : 'supplier',
+    party_id: Number(party.local_id),
+    party: party.name,
+    party_due: r2(party.due),
+    bill_due: billDue,
+    older_due: olderDue,
+    to_clear: billDue > 0.009 ? r2(billDue + olderDue) : 0,
+  };
+}
+
 export async function customerPayment(storePk, user, body) {
   const { amount, mode } = payAmounts(body);
   let made;

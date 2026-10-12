@@ -168,6 +168,14 @@ router.get('/payments/customers', need('parties'), asyncHandler(async (req, res)
 router.get('/payments/suppliers', need('parties'), asyncHandler(async (req, res) => {
   ok(res, await store.supplierPayments(req.web.storePk, req.query));
 }));
+// Pay a due from Sales / Purchase History: what is open on the bill (the payment itself is the
+// ordinary payment below, with the bill number as its reference).
+router.get('/sales/:id/due', need('payments'), asyncHandler(async (req, res) => {
+  ok(res, await store.billDueInfo(req.web.storePk, 'sale', req.params.id));
+}));
+router.get('/purchases/:id/due', need('payments'), asyncHandler(async (req, res) => {
+  ok(res, await store.billDueInfo(req.web.storePk, 'purchase', req.params.id));
+}));
 router.post('/payments/customers', need('payments'), asyncHandler(async (req, res) => {
   ok(res, await store.customerPayment(...W(req), req.body || {}));
 }));

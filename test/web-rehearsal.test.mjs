@@ -191,6 +191,24 @@ const sp = await okCall('POST', '/api/web/payments/suppliers', { token: owner, b
 assert.match(sp.payment_no, /^PAY\d+-\d+$/);
 step(`supplier payment ${sp.payment_no}`);
 
+// Pay a due from history (owner, 12 Oct 2026): what is open on the bill, then an ordinary
+// payment with the bill number as reference; the bill's own due clears (oldest bill first).
+const billDue = await okCall('GET', `/api/web/sales/${sale.id}/due`, { token: owner });
+assert.equal(Math.round(billDue.bill_due * 100) / 100, Math.round((214 - 100 - 17.5 - 50) * 100) / 100);
+assert.equal(billDue.to_clear, billDue.bill_due + billDue.older_due);
+assert.equal((await call('GET', `/api/web/sales/${sale.id}/due`, { token: staff })).status, 403);
+await okCall('POST', '/api/web/payments/customers', { token: owner,
+  body: { customer_id: billDue.party_id, amount: billDue.to_clear, mode: 'online', reference: billDue.bill_no } });
+const paidBill = await okCall('GET', `/api/web/sales/${sale.id}`, { token: owner });
+assert.ok(Number(paidBill.total_due) <= 0.009 && paidBill.bill_cleared, JSON.stringify({ d: paidBill.total_due, c: paidBill.bill_cleared }));
+const purDue = await okCall('GET', `/api/web/purchases/${pur.id}/due`, { token: owner });
+assert.ok(purDue.bill_due > 0);
+await okCall('POST', '/api/web/payments/suppliers', { token: owner,
+  body: { supplier_id: purDue.party_id, amount: purDue.to_clear, mode: 'cash', reference: purDue.bill_no } });
+const paidPur = await okCall('GET', `/api/web/purchases/${pur.id}/due`, { token: owner });
+assert.ok(paidPur.bill_due <= 0.009, JSON.stringify(paidPur));
+step(`pay from history: bill ${billDue.bill_no} (${billDue.bill_due}) and purchase ${purDue.bill_no} (${purDue.bill_due}) cleared; counter staff refused`);
+
 // Walk-in (owner, 9 Oct 2026): no customer name = the shop's COUNTER SALE customer, paid in full.
 const walk = await okCall('POST', '/api/web/sales', { token: staff, body: { items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 80 } });
 assert.equal(walk.sale.customer_name, 'COUNTER SALE');

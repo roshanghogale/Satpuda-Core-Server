@@ -149,3 +149,64 @@ export function BillPrint({ sale, profile }) {
 export function printNow() {
   setTimeout(() => window.print(), 50);
 }
+
+/**
+ * Take a payment for one bill from Sales / Purchase History (owner, 12 Oct 2026). Saved as an
+ * ordinary customer / supplier payment with the bill number as its reference, so the ledger,
+ * the party's due and every bill's status follow. Payments clear the oldest bill first: the
+ * box shows the older dues and fills in the amount that clears this bill.
+ */
+export function PayDue({ kind, billId, onDone, onCancel }) {
+  const [info, setInfo] = useState(null);
+  const [amount, setAmount] = useState('');
+  const [mode, setMode] = useState('cash');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let live = true;
+    setInfo(null); setError('');
+    api(`/${kind === 'sale' ? 'sales' : 'purchases'}/${billId}/due`)
+      .then((d) => { if (live) { setInfo(d); setAmount(d.to_clear > 0 ? String(d.to_clear) : ''); } })
+      .catch((e) => live && setError(e.message));
+    return () => { live = false; };
+  }, [kind, billId]);
+  async function save() {
+    setError(''); setBusy(true);
+    try {
+      const sale = kind === 'sale';
+      const body = sale
+        ? { customer_id: info.party_id, amount: Number(amount), mode, reference: shortNo(info.bill_no), note: `Paid from Sales History (${shortNo(info.bill_no)})` }
+        : { supplier_id: info.party_id, amount: Number(amount), mode, reference: shortNo(info.bill_no) };
+      await api(sale ? '/payments/customers' : '/payments/suppliers', { method: 'POST', body });
+      onDone(sale
+        ? `₹ ${money(amount)} received from ${info.party} against ${shortNo(info.bill_no)}.`
+        : `₹ ${money(amount)} paid to ${info.party} against ${shortNo(info.bill_no)}.`);
+    } catch (e) { setError(e.message); setBusy(false); }
+  }
+  if (!info) return <div className="muted">{error || 'Reading the bill…'}</div>;
+  return (
+    <div className="stack">
+      <table className="grid">
+        <tbody>
+          <tr><td>Due on this bill</td><td className="r">₹ {money(info.bill_due)}</td></tr>
+          {info.older_due > 0.009 && <tr><td>Due on older bills</td><td className="r">₹ {money(info.older_due)}</td></tr>}
+          <tr><td>{kind === 'sale' ? 'Customer' : 'Supplier'} total due</td><td className="r">₹ {money(info.party_due)}</td></tr>
+        </tbody>
+      </table>
+      {info.older_due > 0.009 && info.bill_due > 0.009 && (
+        <p className="muted small">Payments clear the oldest bill first: ₹ {money(info.to_clear)} clears this bill.</p>
+      )}
+      <div className="row wrap">
+        <label>Amount<input className="num" type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
+        <label>Mode<select value={mode} onChange={(e) => setMode(e.target.value)}>
+          <option value="cash">Cash</option><option value="online">Online</option>
+        </select></label>
+      </div>
+      {error && <div className="error">{error}</div>}
+      <div className="row">
+        <button className="btn primary" disabled={busy || !(Number(amount) > 0)} onClick={save}>{busy ? 'Saving…' : 'Save payment'}</button>
+        <button className="btn" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}

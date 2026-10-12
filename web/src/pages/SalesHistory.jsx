@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, fmtDate, money, monthStartIso, qs, shortNo, todayIso } from '../api.js';
-import { BillPrint, printNow, useDebounced } from './common.jsx';
+import { BillPrint, PayDue, printNow, useDebounced } from './common.jsx';
 
 function ReturnForm({ sale, onDone }) {
   const [data, setData] = useState(null);
@@ -54,8 +54,8 @@ export default function SalesHistory({ me, can }) {
   useEffect(() => { load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [from, to, dq]);
 
-  async function show(id) {
-    setMode('view'); setMsg(''); setError('');
+  async function show(id, nextMode = 'view') {
+    setMode(nextMode); setMsg(''); setError('');
     try { setOpen(await api(`/sales/${id}`)); } catch (e) { setError(e.message); }
   }
   async function del() {
@@ -88,11 +88,17 @@ export default function SalesHistory({ me, can }) {
       <div className="split">
         <div className="card no-print list">
           <table className="grid click">
-            <thead><tr><th>Bill</th><th>Date</th><th>Customer</th><th className="r">Total</th><th className="r">Due</th><th>By</th></tr></thead>
+            <thead><tr><th>Bill</th><th>Date</th><th>Customer</th><th className="r">Total</th><th className="r">Due</th><th>Status</th><th>By</th></tr></thead>
             <tbody>{(data?.rows || []).map((r) => (
               <tr key={r.id} onClick={() => show(r.id)} className={open?.id === r.id ? 'sel' : ''}>
                 <td>{shortNo(r.bill_no)}</td><td>{fmtDate(r.bill_date)}</td><td>{r.customer_name}</td>
                 <td className="r">{money(r.total_amount)}</td><td className="r">{Number(r.due_amount) > 0 ? money(r.due_amount) : ''}</td>
+                <td>{Number(r.due_amount) > 0.009
+                  ? (can('payments')
+                    ? <button className="btn small" title="Take a payment for this bill" onClick={(e) => { e.stopPropagation(); show(r.id, 'pay'); }}>
+                        {Number(r.amount_paid) > 0 ? 'Partial' : 'Due'} · Pay</button>
+                    : <span className="muted small">{Number(r.amount_paid) > 0 ? 'Partial' : 'Due'}</span>)
+                  : <span className="muted small">Paid</span>}</td>
                 <td className="small muted">{r.made_by || 'PC/phone'}</td>
               </tr>
             ))}</tbody>
@@ -105,12 +111,17 @@ export default function SalesHistory({ me, can }) {
               <button className="btn" onClick={printNow}>Print</button>
               {can('sales_edit') && <button className="btn" onClick={() => nav(`/billing/edit/${open.id}`)}>Edit</button>}
               {can('returns') && <button className="btn" onClick={() => setMode(mode === 'return' ? 'view' : 'return')}>Return</button>}
+              {can('payments') && Number(open.due_amount ?? open.total_due) > 0.009 && <button className="btn" onClick={() => setMode(mode === 'pay' ? 'view' : 'pay')}>Receive payment</button>}
               {can('sales_delete') && <button className="btn danger" onClick={del}>Delete</button>}
               <span className="muted small">Made by {open.made_by || 'PC / phone'}</span>
             </div>
             {mode === 'return'
               ? <div className="card"><h3>Return from bill {shortNo(open.bill_no)}</h3><ReturnForm sale={open} onDone={(m) => { setMsg(m); setMode('view'); load(); }} /></div>
-              : <BillPrint sale={open} profile={me.profile} />}
+              : mode === 'pay'
+                ? <div className="card"><h3>Receive payment · {shortNo(open.bill_no)} · {open.customer_name}</h3>
+                    <PayDue kind="sale" billId={open.id} onCancel={() => setMode('view')}
+                      onDone={(m) => { setMsg(m); setMode('view'); load(); show(open.id); setMsg(m); }} /></div>
+                : <BillPrint sale={open} profile={me.profile} />}
           </div>
         )}
       </div>

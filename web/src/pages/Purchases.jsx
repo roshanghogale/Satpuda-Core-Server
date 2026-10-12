@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { api, fmtDate, fmtExpiry, money, monthStartIso, qs, todayIso } from '../api.js';
-import { MedicineSearch, PartyPicker, useDebounced } from './common.jsx';
+import { MedicineSearch, PartyPicker, PayDue, useDebounced } from './common.jsx';
 
 const EMPTY = { name: '', batch_no: '', expiry: '', type: 'Tablet', unit: '10', qty: '', free_qty: '', rate: '', mrp: '', gst_pct: '12', discount_pct: '', hsn_code: '', schedule: '', manufacturer: '' };
 const TYPES = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Ointment', 'Drops', 'Powder', 'Bolus', 'Tablet Pack', 'Other'];
@@ -134,8 +134,12 @@ function History({ can }) {
   const dq = useDebounced(q, 300);
   const [data, setData] = useState(null);
   const [open, setOpen] = useState(null);
+  const [paying, setPaying] = useState(false);
+  const [msg, setMsg] = useState('');
   const [error, setError] = useState('');
   const load = () => api(`/purchases${qs({ from, to, q: dq })}`).then(setData).catch((e) => setError(e.message));
+  const show = (id, pay = false) => { setMsg(''); setPaying(pay); api(`/purchases/${id}`).then(setOpen).catch((e) => setError(e.message)); };
+  const dueOf = (r) => Number(r.total_due ?? r.due_amount ?? 0);
   useEffect(() => { load(); // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [from, to, dq]);
   async function del() {
@@ -151,14 +155,23 @@ function History({ can }) {
         {data?.summary && <div className="tiles"><div><span>Purchases</span><b>{data.summary.bills ?? data.summary.rows}</b></div><div><span>Total</span><b>₹ {money(data.summary.gross ?? data.summary.total)}</b></div></div>}
       </div>
       {error && <div className="error">{error}</div>}
+      {msg && <div className="okmsg">{msg}</div>}
       <div className="split">
         <div className="card list">
           <table className="grid click">
-            <thead><tr><th>No</th><th>Date</th><th>Supplier</th><th>Bill no</th><th className="r">Total</th><th>By</th></tr></thead>
+            <thead><tr><th>No</th><th>Date</th><th>Supplier</th><th>Bill no</th><th className="r">Total</th><th className="r">Due</th><th>Status</th><th>By</th></tr></thead>
             <tbody>{(data?.rows || []).map((r) => (
-              <tr key={r.id} onClick={() => api(`/purchases/${r.id}`).then(setOpen)} className={open?.id === r.id ? 'sel' : ''}>
+              <tr key={r.id} onClick={() => show(r.id)} className={open?.id === r.id ? 'sel' : ''}>
                 <td>{String(r.purchase_no).split('/FY')[0]}</td><td>{fmtDate(r.purchase_date)}</td><td>{r.supplier_name}</td><td>{r.bill_number}</td>
-                <td className="r">{money(r.final_amount ?? r.total_amount)}</td><td className="small muted">{r.made_by || 'PC/phone'}</td>
+                <td className="r">{money(r.final_amount ?? r.total_amount)}</td>
+                <td className="r">{dueOf(r) > 0.009 ? money(dueOf(r)) : ''}</td>
+                <td>{dueOf(r) > 0.009
+                  ? (can('payments')
+                    ? <button className="btn small" title="Pay the supplier for this purchase" onClick={(e) => { e.stopPropagation(); show(r.id, true); }}>
+                        {dueOf(r) < Number(r.final_amount ?? r.total_amount) - 0.009 ? 'Partial' : 'Due'} · Pay</button>
+                    : <span className="muted small">Due</span>)
+                  : <span className="muted small">Paid</span>}</td>
+                <td className="small muted">{r.made_by || 'PC/phone'}</td>
               </tr>))}</tbody>
           </table>
         </div>
@@ -167,7 +180,11 @@ function History({ can }) {
             <strong>Purchase {String(open.purchase_no).split('/FY')[0]} · {open.supplier_name}</strong>
             {can('purchase_edit') && <button className="btn" onClick={() => nav(`/purchases/edit/${open.id}`)}>Edit</button>}
             {can('purchase_delete') && <button className="btn danger" onClick={del}>Delete</button>}
+            {can('payments') && Number(open.total_due ?? open.due_amount ?? 0) > 0.009 && <button className="btn" onClick={() => setPaying(!paying)}>Pay supplier</button>}
           </div>
+          {paying && <div className="card"><h3>Pay supplier · {open.supplier_name}</h3>
+            <PayDue kind="purchase" billId={open.id} onCancel={() => setPaying(false)}
+              onDone={(m) => { setPaying(false); load(); show(open.id); setMsg(m); }} /></div>}
           <table className="grid compact">
             <thead><tr><th>Medicine</th><th>Batch</th><th>Exp</th><th className="r">Qty</th><th className="r">Free</th><th className="r">Rate</th><th className="r">GST%</th><th className="r">Amount</th></tr></thead>
             <tbody>{(open.items || []).map((it, i) => <tr key={i}><td>{it.name}</td><td>{it.batch_no}</td><td>{fmtExpiry(it.expiry_date)}</td>
