@@ -1248,7 +1248,7 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
     }
   }
   // An edit that moved the purchase to another supplier: the one it left is owed less.
-  // Store 4, 6 Oct 2026: purchase 106 went from TULJAI to VINOD and TULJAI's due kept the
+  // Store 4, 6 Oct 2026: purchase 106 went from SUPPLIER T to SUPPLIER V and SUPPLIER T's due kept the
   // Rs 1503 of a bill it no longer had.
   const leftSupplier = Number(existingRow?.supplier_id);
   if (leftSupplier > 0 && leftSupplier !== supplierId) {
