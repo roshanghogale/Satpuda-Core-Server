@@ -99,25 +99,31 @@ export function MedicineSearch({ mode = 'sellable', onPick, autoFocus, placehold
 }
 
 /**
- * Returns settled in a bill (owner, 17 Oct 2026): a "Return SR1-7 17-10-2026" row, then the
- * medicines that came back, their amounts shown as minus. `cols` = columns of the table.
+ * Returns settled in a bill (owner, 17-18 Oct 2026): a centred "Return SR1-7 17-10-2026" row
+ * (no customer name), the medicines that came back one per row like the items (batch, expiry,
+ * qty, MRP, minus amount), then the return's total. `cols` = 7, the bill table's columns.
  */
-export function ReturnRows({ returns, cols }) {
+export function ReturnRows({ returns }) {
   return (returns || []).map((r) => [
     <tr key={`r${r.return_id}`} className="ret-head">
-      <td colSpan={cols - 1}>Return {r.return_no} {fmtDate(r.return_date)}
-        {Number(r.refund) > r.amount + 0.009 ? ` (₹ ${money(r.amount)} of ₹ ${money(r.refund)} used in this bill)` : ''}</td>
-      <td className="r">− {money(r.amount)}</td>
+      <td colSpan={7} className="center">Return {r.return_no} {fmtDate(r.return_date)}</td>
     </tr>,
     ...(r.items || []).map((it, i) => (
       <tr key={`r${r.return_id}-${i}`} className="ret-line">
-        <td />
-        <td colSpan={cols - 4}>{it.name}</td>
+        <td>{i + 1}</td>
+        <td>{it.name}</td>
+        <td>{it.batch_no}</td>
+        <td>{fmtExpiry(it.expiry)}</td>
         <td className="r">{it.qty}</td>
-        <td />
+        <td className="r">{Number(it.mrp) ? money(it.mrp) : ''}</td>
         <td className="r">− {money(it.amount)}</td>
       </tr>
     )),
+    <tr key={`r${r.return_id}-t`} className="ret-total">
+      <td colSpan={6} className="r">Return total
+        {Number(r.refund) > r.amount + 0.009 ? ` (₹ ${money(r.amount)} of ₹ ${money(r.refund)} used in this bill)` : ''}</td>
+      <td className="r">− {money(r.amount)}</td>
+    </tr>,
   ]);
 }
 
@@ -158,7 +164,7 @@ export function BillPrint({ sale, profile }) {
               <td className="r">{money(it.amount)}</td>
             </tr>
           ))}
-          <ReturnRows returns={rets} cols={7} />
+          <ReturnRows returns={rets} />
         </tbody>
       </table>
       <div className="bp-tot">

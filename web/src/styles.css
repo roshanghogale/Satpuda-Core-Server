@@ -144,6 +144,8 @@ input.num { width: 72px; text-align: right; padding: 4px 6px; }
   .bp-meta { grid-template-columns: 1fr; }
 }
 
-/* Returns settled in a bill: a Return row, then its medicines. */
-.ret-head td { font-style: italic; border-top: 1px dashed var(--line); }
-.ret-line td { opacity: .8; font-size: 12px; }
+/* Returns settled in a bill: a centred Return row, its medicines like items, its total. */
+.ret-head td { text-align: center; font-weight: 700; border-top: 1px solid currentColor; border-bottom: 1px solid currentColor; }
+.ret-line td { font-style: italic; }
+.ret-total td { font-weight: 700; border-top: 1px solid currentColor; }
+.center { text-align: center; }

@@ -334,11 +334,27 @@ export async function returnsInBill(storePk, kind, billId) {
   );
   if (!rows.length) return [];
   const docs = await fetchDocsByLocalIds(storePk, t, rows.map((r) => Number(r.local_id)));
+  // The medicines that came back print like the bill's items (owner, 18 Oct 2026): batch,
+  // expiry and MRP from the medicine.
+  const mids = [...new Set(docs.flatMap((d) => (d.items || []).map((it) => Number(it.medicine_id)).filter((v) => v > 0)))];
+  const meds = new Map();
+  if (mids.length) {
+    const { rows: mr } = await query(
+      `SELECT local_id, batch_no, expiry_date::text AS expiry, COALESCE(mrp,0)::float AS mrp
+         FROM medicines WHERE store_pk=$1 AND local_id = ANY($2::bigint[])`,
+      [storePk, mids],
+    );
+    for (const m of mr) meds.set(Number(m.local_id), m);
+  }
   return docs.filter((d) => !d.deleted).map((d) => ({
     return_id: Number(d.id), return_no: d.return_no, return_date: String(d.return_date).slice(0, 10),
     refund: r2(d.refund_amount),
     amount: r2(cleanAllocations(d.allocations).filter((a) => a.bill_id === Number(billId)).reduce((x, a) => x + a.amount, 0)),
-    items: (d.items || []).map((it) => ({ name: it.name, batch_no: it.batch_no, qty: Number(it.qty), rate: Number(it.rate), amount: r2(it.amount) })),
+    items: (d.items || []).map((it) => {
+      const m = meds.get(Number(it.medicine_id)) || {};
+      return { name: it.name, batch_no: it.batch_no || m.batch_no || '', expiry: m.expiry || '', mrp: r2(m.mrp || 0),
+        qty: Number(it.qty), rate: Number(it.rate), amount: r2(it.amount) };
+    }),
   })).sort((a, b) => (a.return_date < b.return_date ? -1 : a.return_date > b.return_date ? 1 : a.return_id - b.return_id));
 }
 

@@ -165,15 +165,18 @@ export default function Billing({ me }) {
             {!lines.length && <tr><td colSpan={8} className="muted center">Search a medicine above and press Enter to add it.</td></tr>}
             {pickedRets.map((r) => [
               <tr key={`r${r.return_id}`} className="ret-head">
-                <td colSpan={6}>Return {r.return_no} {fmtDate(r.return_date)} <span className="muted small">(bill {r.bill_no}
-                  {r.left < r.amount - 0.009 ? ` · ₹ ${money(r.amount - r.left)} of ₹ ${money(r.amount)} already went to older dues` : ''})</span></td>
-                <td className="r">− {money(r.left)}</td><td />
+                <td colSpan={8}>Return {r.return_no} {fmtDate(r.return_date)}</td>
               </tr>,
               ...r.items.map((it, j) => (
                 <tr key={`r${r.return_id}-${j}`} className="ret-line">
-                  <td colSpan={3}>{it.name}</td><td className="r">{it.qty}</td><td /><td />
+                  <td colSpan={3}>{j + 1}. {it.name}</td><td className="r">{it.qty}</td><td /><td />
                   <td className="r">− {money(it.amount)}</td><td />
                 </tr>)),
+              <tr key={`r${r.return_id}-t`} className="ret-total">
+                <td colSpan={6} className="r">Return total <span className="muted small">(bill {r.bill_no}
+                  {r.left < r.amount - 0.009 ? ` · ₹ ${money(r.amount - r.left)} of ₹ ${money(r.amount)} already went to older dues` : ''})</span></td>
+                <td className="r">− {money(r.left)}</td><td />
+              </tr>,
             ])}
           </tbody>
         </table>
