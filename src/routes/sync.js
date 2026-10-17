@@ -145,7 +145,22 @@ router.get('/settings/shelf_settings', asyncHandler(async (req, res) => {
   ok(res, await pullCollection(await storePk(req), 'shelf_settings'));
 }));
 router.get('/settings/kv', asyncHandler(async (req, res) => {
-  ok(res, await pullCollection(await storePk(req), 'settings', { since: req.query.since }));
+  const rows = await pullCollection(await storePk(req), 'settings', { since: req.query.since });
+  // ?names=a,b (exact) and/or ?prefix=x,y: only those rows (owner, 17 Oct 2026). The list
+  // carries the home banner picture (~350 KB at a large shop), and the PC read the whole list
+  // to find a logo, a signature or one customer's GSTIN -- on every bill printed. Without
+  // either parameter the answer is exactly what it always was.
+  const csv = (v) => String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const names = csv(req.query.names);
+  const prefixes = csv(req.query.prefix);
+  if ((names.length || prefixes.length) && Array.isArray(rows)) {
+    const want = new Set(names);
+    return ok(res, rows.filter((r) => {
+      const name = String(r?.name ?? '');
+      return want.has(name) || prefixes.some((p) => name.startsWith(p));
+    }));
+  }
+  ok(res, rows);
 }));
 
 /**
