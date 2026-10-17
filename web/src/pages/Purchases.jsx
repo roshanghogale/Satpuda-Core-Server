@@ -124,7 +124,7 @@ function PurchaseForm({ editId }) {
         {pickedRets.length > 0 && (
           <table className="grid compact">
             <tbody>{pickedRets.map((r) => [
-              <tr key={`r${r.return_id}`} className="ret-head"><td colSpan={4}>Return {r.return_no} {fmtDate(r.return_date)}</td></tr>,
+              <tr key={`r${r.return_id}`} className="ret-head"><td colSpan={4}>Return {r.return_no} {fmtDate(r.return_date)}{supplier.name ? ` · ${supplier.name.toUpperCase()}` : ''}</td></tr>,
               ...r.items.map((it, j) => <tr key={`r${r.return_id}-${j}`} className="ret-line"><td>{j + 1}</td><td>{it.name}</td><td className="r">{it.qty}</td><td className="r">− {money(it.amount)}</td></tr>),
               <tr key={`r${r.return_id}-t`} className="ret-total"><td colSpan={3} className="r">Return total <span className="muted small">(purchase {r.bill_no})</span></td>
                 <td className="r">− {money(r.left)}</td></tr>,
