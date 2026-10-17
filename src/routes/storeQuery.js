@@ -181,7 +181,7 @@ router.get('/payments/customers', asyncHandler(async (req, res) => {
   params.push(limit);
   const { rows } = await query(
     `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
-            cash_amount, online_amount, reference_no, note, created_at
+            cash_amount, online_amount, reference_no, note, created_at, allocations
      FROM customer_payments WHERE ${where}
      ORDER BY payment_date DESC, local_id DESC LIMIT $${params.length}`,
     params,
@@ -205,7 +205,7 @@ router.get('/payments/suppliers', asyncHandler(async (req, res) => {
   params.push(limit);
   const { rows } = await query(
     `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
-            reference, due_before, due_after, created_at
+            reference, due_before, due_after, created_at, allocations
      FROM supplier_payments WHERE ${where}
      ORDER BY payment_date DESC, local_id DESC LIMIT $${params.length}`,
     params,
