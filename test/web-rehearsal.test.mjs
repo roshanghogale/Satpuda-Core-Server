@@ -149,6 +149,21 @@ assert.equal(saleNow.total_amount, 214, 'bill not re-priced');
 const rep = await okCall('GET', '/api/web/reports', { token: owner });
 assert.ok(rep.schedule_register.some((r) => r.sale_id === sale.id && r.schedule === 'H1'));
 step(`schedule H1 flows into the old bill (${medEdit.note}); price and total unchanged; bill is in the schedule register`);
+
+// 17 Oct 2026: the page reads the figures without the register, and the register on its own.
+const repLite = await okCall('GET', '/api/web/reports?register=0', { token: owner });
+assert.equal(repLite.schedule_register, null, 'register=0 leaves the register out');
+assert.deepEqual(repLite.gst_sales, rep.gst_sales, 'the figures are the same without it');
+const reg = await okCall('GET', '/api/web/reports/register', { token: owner });
+assert.ok(reg.schedules.includes('H1'));
+const billNo = rep.schedule_register.find((r) => r.sale_id === sale.id).bill_no;
+assert.ok(reg.rows.some((r) => r.bill_no === billNo && r.schedule === 'H1'));
+assert.equal(reg.rows.length, rep.schedule_register.length, 'the same lines as the full report');
+assert.ok(!('customer_address' in reg.rows[0]), 'only the columns the page shows');
+const regH1 = await okCall('GET', '/api/web/reports/register?schedule=H1', { token: owner });
+assert.ok(regH1.rows.length >= 1 && regH1.rows.every((r) => r.schedule === 'H1'));
+assert.equal((await call('GET', '/api/web/reports/register', { token: staff })).status, 403);
+step('reports: figures without the register (register=0); register on its own, filtered by schedule on the server, staff refused');
 const blank = await okCall('PUT', `/api/web/inventory/${para.id}`, { token: owner, body: { mrp: 36 } });
 assert.equal(blank.note, '', 'a price edit touches no old line');
 assert.equal((await okCall('GET', `/api/web/sales/${sale.id}`, { token: owner })).items.find((i) => i.medicine_id === para.id).rate, 3.5);

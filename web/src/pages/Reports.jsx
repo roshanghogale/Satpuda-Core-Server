@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, fmtDate, fmtExpiry, money, monthStartIso, qs, shortNo, todayIso } from '../api.js';
-import { printNow } from './common.jsx';
+import { printNow, useDebounced } from './common.jsx';
 
 export default function Reports({ me }) {
   const [from, setFrom] = useState(monthStartIso());
@@ -8,9 +8,30 @@ export default function Reports({ me }) {
   const [r, setR] = useState(null);
   const [error, setError] = useState('');
   const [onlySched, setOnlySched] = useState('');
-  useEffect(() => { api(`/reports${qs({ from, to })}`).then(setR).catch((e) => setError(e.message)); }, [from, to]);
-  const sched = (r?.schedule_register || []).filter((x) => !onlySched || x.schedule === onlySched);
-  const schedules = [...new Set((r?.schedule_register || []).map((x) => x.schedule))];
+  const [reg, setReg] = useState(null);
+  // The figures first, the schedule register on its own: over a year the register is
+  // thousands of lines and held the tiles and GST tables up behind it. Dates settle
+  // before asking, so typing a date is not one request per key (17 Oct 2026).
+  const span = useDebounced(JSON.stringify({ from, to }), 400);
+  useEffect(() => {
+    const { from: f, to: t } = JSON.parse(span);
+    let live = true;
+    api(`/reports${qs({ from: f, to: t, register: 0 })}`)
+      .then((x) => { if (live) { setR(x); setError(''); } })
+      .catch((e) => { if (live) setError(e.message); });
+    return () => { live = false; };
+  }, [span]);
+  useEffect(() => {
+    const { from: f, to: t } = JSON.parse(span);
+    let live = true;
+    setReg(null);
+    api(`/reports/register${qs({ from: f, to: t, schedule: onlySched })}`)
+      .then((x) => { if (live) setReg(x); })
+      .catch((e) => { if (live) setError(e.message); });
+    return () => { live = false; };
+  }, [span, onlySched]);
+  const sched = reg?.rows || [];
+  const schedules = reg?.schedules || (onlySched ? [onlySched] : []);
   return (
     <div>
       <div className="card row wrap no-print">
@@ -52,7 +73,9 @@ export default function Reports({ me }) {
             <tbody>{sched.map((x, i) => <tr key={i}><td>{fmtDate(x.bill_date)}</td><td>{shortNo(x.bill_no)}</td><td>{x.customer_name}</td><td>{x.doctor_name}</td>
               <td>{x.name}</td><td>{x.schedule}</td><td>{x.batch_no}</td><td>{fmtExpiry(x.expiry_date)}</td><td className="r">{x.qty}</td></tr>)}</tbody>
           </table>
-          {!sched.length && <p className="muted">No scheduled medicine sold in these dates.</p>}
+          {!reg && <p className="muted">Loading the register…</p>}
+          {reg?.truncated && <p className="muted">Showing the first 5000 lines: pick a schedule or shorter dates for the rest.</p>}
+          {reg && !sched.length && <p className="muted">No scheduled medicine sold in these dates.</p>}
         </div>
       </>}
     </div>

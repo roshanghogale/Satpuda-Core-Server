@@ -219,9 +219,13 @@ export async function supplierPayments(storePk, opts) {
 }
 
 /** Sales, purchases, GST by rate and the schedule register for a date range. */
-export async function reports(storePk, { from, to } = {}) {
+export async function reports(storePk, { from, to, register } = {}) {
   const f = String(from || todayIst()).slice(0, 10);
   const t = String(to || todayIst()).slice(0, 10);
+  // register=0: the figures without the schedule register, which the page now reads on
+  // its own (/reports/register). Over a year that register is thousands of lines -- 1.4 MB
+  // at a large shop -- and it held up the tiles and GST tables behind it (17 Oct 2026).
+  const withRegister = String(register ?? '1') !== '0';
   const [sales, purchases, gstSales, gstPurch, schedule, returns] = await Promise.all([
     admin.listSales(storePk, { from: f, to: t, include_summary: '1', limit: 1 }),
     admin.listPurchases(storePk, { from: f, to: t, include_summary: '1', limit: 1 }),
@@ -246,7 +250,7 @@ export async function reports(storePk, { from, to } = {}) {
         GROUP BY pi.gst_pct ORDER BY pi.gst_pct`,
       [storePk, f, t],
     ),
-    query(
+    !withRegister ? Promise.resolve({ rows: null }) : query(
       `SELECT s.local_id AS sale_id, s.bill_no, s.bill_date, s.customer_name, s.customer_address, s.doctor_name,
               si.name, si.batch_no, si.expiry_date, si.qty,
               COALESCE(NULLIF(BTRIM(si.schedule),''), NULLIF(BTRIM(m.schedule),'')) AS schedule,
@@ -272,6 +276,38 @@ export async function reports(storePk, { from, to } = {}) {
     sales_returns: returns.rows[0],
     gst_sales: gs, gst_purchases: gstPurch.rows,
     schedule_register: schedule.rows,
+  };
+}
+
+/**
+ * The schedule register on its own: the columns the page shows, one schedule or all, and
+ * the schedules sold in the dates for its dropdown. truncated when the 5000-line cap cut it.
+ */
+export async function scheduleRegister(storePk, { from, to, schedule } = {}) {
+  const f = String(from || todayIst()).slice(0, 10);
+  const t = String(to || todayIst()).slice(0, 10);
+  const only = String(schedule || '').trim();
+  const sched = `COALESCE(NULLIF(BTRIM(si.schedule),''), NULLIF(BTRIM(m.schedule),''))`;
+  const base = `FROM sales s JOIN sales_items si ON si.sale_id=s.id
+         LEFT JOIN medicines m ON m.store_pk=si.store_pk AND m.local_id=si.medicine_id
+        WHERE s.store_pk=$1 AND NOT s.deleted AND NOT s.is_autosave AND s.bill_date BETWEEN $2 AND $3
+          AND ${sched} IS NOT NULL`;
+  const [rows, names] = await Promise.all([
+    query(
+      `SELECT s.bill_no, s.bill_date, s.customer_name, s.doctor_name,
+              si.name, si.batch_no, si.expiry_date, si.qty, ${sched} AS schedule
+         ${base} ${only ? `AND ${sched} = $4` : ''}
+        ORDER BY s.bill_date, s.fy_serial NULLS LAST, s.local_id
+        LIMIT 5001`,
+      only ? [storePk, f, t, only] : [storePk, f, t],
+    ),
+    query(`SELECT DISTINCT ${sched} AS schedule ${base} ORDER BY 1`, [storePk, f, t]),
+  ]);
+  return {
+    from: f, to: t,
+    rows: rows.rows.slice(0, 5000),
+    truncated: rows.rows.length > 5000,
+    schedules: names.rows.map((r) => r.schedule),
   };
 }
 

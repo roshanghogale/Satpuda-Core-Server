@@ -254,7 +254,12 @@ app.use('/api/web', webRoutes);
 // new build reaches every browser at once.
 const webDist = path.join(__dirname, '../web/dist');
 app.use('/web', express.static(webDist, {
-  setHeaders: (res, p) => { if (p.endsWith('.html')) res.set('Cache-Control', 'no-store'); },
+  setHeaders: (res, p) => {
+    if (p.endsWith('.html')) res.set('Cache-Control', 'no-store');
+    // Built files carry a content hash in their name (index-Bc4MnRsy.js): a new build is a
+    // new name, so the browser may keep one for a year instead of re-asking every 4 hours.
+    else if (/[\\/]assets[\\/]/.test(p)) res.set('Cache-Control', 'public, max-age=31536000, immutable');
+  },
 }));
 app.get(/^\/web(\/.*)?$/, (_req, res) => {
   res.set('Cache-Control', 'no-store');

@@ -188,6 +188,9 @@ router.post('/payments/suppliers', need('payments'), asyncHandler(async (req, re
 router.get('/reports', need('reports'), asyncHandler(async (req, res) => {
   ok(res, await store.reports(req.web.storePk, req.query));
 }));
+router.get('/reports/register', need('reports'), asyncHandler(async (req, res) => {
+  ok(res, await store.scheduleRegister(req.web.storePk, req.query));
+}));
 
 // ─── Staff (owner, or a manager given the 'staff' switch) ────────────────────
 
