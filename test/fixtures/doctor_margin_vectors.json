@@ -1,0 +1,2014 @@
+[
+  {
+    "name": "A regular 10%",
+    "sales": [
+      {
+        "id": 1,
+        "bill_no": "B1",
+        "date": "2026-10-01",
+        "patient": "PATIENT ONE",
+        "doctor": "DR A",
+        "total_amount": 200,
+        "items": [
+          {
+            "medicine_id": 11,
+            "name": "GEL X",
+            "type": "Gel",
+            "batch": "G1",
+            "qty": 10,
+            "amount": 200,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 11,
+        "qty": 10,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [
+        {
+          "date": "2026-10-01",
+          "patient": "PATIENT ONE",
+          "doctor": "DR A",
+          "bill_no": "B1",
+          "medicine_id": 11,
+          "name": "GEL X",
+          "type": "Gel",
+          "batch": "G1",
+          "qty": 10,
+          "sale_rate": 20,
+          "purchase_rate": 10,
+          "basis": "scheme",
+          "amount": 200,
+          "cost": 100,
+          "profit": 100,
+          "pct": 10,
+          "commission": 20,
+          "remaining": 80,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "DR A",
+          "medicine_id": 11,
+          "name": "GEL X",
+          "type": "Gel",
+          "batch": "G1",
+          "basis": "scheme",
+          "qty": 10,
+          "avg_sale_rate": 20,
+          "purchase_rate": 10,
+          "amount": 200,
+          "cost": 100,
+          "profit": 100,
+          "pct": 10,
+          "commission": 20,
+          "remaining": 80,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "DR A",
+          "qty": 10,
+          "amount": 200,
+          "cost": 100,
+          "commission": 20,
+          "profit": 100,
+          "remaining": 80
+        }
+      ],
+      "totals": {
+        "qty": 10,
+        "amount": 200,
+        "cost": 100,
+        "commission": 20,
+        "profit": 100,
+        "remaining": 80
+      }
+    }
+  },
+  {
+    "name": "A regular 15%",
+    "sales": [
+      {
+        "id": 1,
+        "bill_no": "B1",
+        "date": "2026-10-01",
+        "patient": "PATIENT ONE",
+        "doctor": "DR A",
+        "total_amount": 200,
+        "items": [
+          {
+            "medicine_id": 11,
+            "name": "GEL X",
+            "type": "Gel",
+            "batch": "G1",
+            "qty": 10,
+            "amount": 200,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 11,
+        "qty": 10,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 15
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 15,
+      "rows": [
+        {
+          "date": "2026-10-01",
+          "patient": "PATIENT ONE",
+          "doctor": "DR A",
+          "bill_no": "B1",
+          "medicine_id": 11,
+          "name": "GEL X",
+          "type": "Gel",
+          "batch": "G1",
+          "qty": 10,
+          "sale_rate": 20,
+          "purchase_rate": 10,
+          "basis": "scheme",
+          "amount": 200,
+          "cost": 100,
+          "profit": 100,
+          "pct": 15,
+          "commission": 30,
+          "remaining": 70,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "DR A",
+          "medicine_id": 11,
+          "name": "GEL X",
+          "type": "Gel",
+          "batch": "G1",
+          "basis": "scheme",
+          "qty": 10,
+          "avg_sale_rate": 20,
+          "purchase_rate": 10,
+          "amount": 200,
+          "cost": 100,
+          "profit": 100,
+          "pct": 15,
+          "commission": 30,
+          "remaining": 70,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "DR A",
+          "qty": 10,
+          "amount": 200,
+          "cost": 100,
+          "commission": 30,
+          "profit": 100,
+          "remaining": 70
+        }
+      ],
+      "totals": {
+        "qty": 10,
+        "amount": 200,
+        "cost": 100,
+        "commission": 30,
+        "profit": 100,
+        "remaining": 70
+      }
+    }
+  },
+  {
+    "name": "B supplier scheme 10+10 free",
+    "sales": [
+      {
+        "id": 2,
+        "bill_no": "B2",
+        "date": "2026-10-02",
+        "patient": "PATIENT TWO",
+        "doctor": "DR A",
+        "total_amount": 20,
+        "items": [
+          {
+            "medicine_id": 12,
+            "name": "CREAM Y",
+            "type": "Cream",
+            "batch": "C1",
+            "qty": 2,
+            "amount": 20,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 12,
+        "qty": 10,
+        "free_qty": 10,
+        "item_amount": 100,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [
+        {
+          "date": "2026-10-02",
+          "patient": "PATIENT TWO",
+          "doctor": "DR A",
+          "bill_no": "B2",
+          "medicine_id": 12,
+          "name": "CREAM Y",
+          "type": "Cream",
+          "batch": "C1",
+          "qty": 2,
+          "sale_rate": 10,
+          "purchase_rate": 5,
+          "basis": "scheme",
+          "amount": 20,
+          "cost": 10,
+          "profit": 10,
+          "pct": 10,
+          "commission": 2,
+          "remaining": 8,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "DR A",
+          "medicine_id": 12,
+          "name": "CREAM Y",
+          "type": "Cream",
+          "batch": "C1",
+          "basis": "scheme",
+          "qty": 2,
+          "avg_sale_rate": 10,
+          "purchase_rate": 5,
+          "amount": 20,
+          "cost": 10,
+          "profit": 10,
+          "pct": 10,
+          "commission": 2,
+          "remaining": 8,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "DR A",
+          "qty": 2,
+          "amount": 20,
+          "cost": 10,
+          "commission": 2,
+          "profit": 10,
+          "remaining": 8
+        }
+      ],
+      "totals": {
+        "qty": 2,
+        "amount": 20,
+        "cost": 10,
+        "commission": 2,
+        "profit": 10,
+        "remaining": 8
+      }
+    }
+  },
+  {
+    "name": "C injection ignores the percentage",
+    "sales": [
+      {
+        "id": 3,
+        "bill_no": "B3",
+        "date": "2026-10-03",
+        "patient": "PATIENT THREE",
+        "doctor": "DR B",
+        "total_amount": 150,
+        "items": [
+          {
+            "medicine_id": 13,
+            "name": "INJ Z",
+            "type": "Injection",
+            "batch": "I1",
+            "qty": 1,
+            "amount": 150,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 13,
+        "qty": 1,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "injection",
+      "pct": 37
+    },
+    "expect": {
+      "mode": "injection",
+      "pct": 100,
+      "rows": [
+        {
+          "date": "2026-10-03",
+          "patient": "PATIENT THREE",
+          "doctor": "DR B",
+          "bill_no": "B3",
+          "medicine_id": 13,
+          "name": "INJ Z",
+          "type": "Injection",
+          "batch": "I1",
+          "qty": 1,
+          "sale_rate": 150,
+          "purchase_rate": 100,
+          "basis": "scheme",
+          "amount": 150,
+          "cost": 100,
+          "profit": 50,
+          "pct": 100,
+          "commission": 50,
+          "remaining": 0,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "DR B",
+          "medicine_id": 13,
+          "name": "INJ Z",
+          "type": "Injection",
+          "batch": "I1",
+          "basis": "scheme",
+          "qty": 1,
+          "avg_sale_rate": 150,
+          "purchase_rate": 100,
+          "amount": 150,
+          "cost": 100,
+          "profit": 50,
+          "pct": 100,
+          "commission": 50,
+          "remaining": 0,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "DR B",
+          "qty": 1,
+          "amount": 150,
+          "cost": 100,
+          "commission": 50,
+          "profit": 50,
+          "remaining": 0
+        }
+      ],
+      "totals": {
+        "qty": 1,
+        "amount": 150,
+        "cost": 100,
+        "commission": 50,
+        "profit": 50,
+        "remaining": 0
+      }
+    }
+  },
+  {
+    "name": "C injection is not in the regular report",
+    "sales": [
+      {
+        "id": 3,
+        "bill_no": "B3",
+        "date": "2026-10-03",
+        "patient": "PATIENT THREE",
+        "doctor": "DR B",
+        "total_amount": 150,
+        "items": [
+          {
+            "medicine_id": 13,
+            "name": "INJ Z",
+            "type": "Injection",
+            "batch": "I1",
+            "qty": 1,
+            "amount": 150,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 13,
+        "qty": 1,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [],
+      "summary": [],
+      "doctors": [],
+      "totals": {
+        "qty": 0,
+        "amount": 0,
+        "cost": 0,
+        "commission": 0,
+        "profit": 0,
+        "remaining": 0
+      }
+    }
+  },
+  {
+    "name": "D many bills, batches and doctors",
+    "sales": [
+      {
+        "id": 10,
+        "bill_no": "B10",
+        "date": "2026-10-05",
+        "patient": "P ONE",
+        "doctor": "DR A",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 22,
+            "name": "TAB T",
+            "type": "Tablet",
+            "batch": "T1",
+            "qty": 10,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 11,
+        "bill_no": "B11",
+        "date": "2026-10-06",
+        "patient": "P TWO",
+        "doctor": "DR A",
+        "total_amount": 50,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 12,
+        "bill_no": "B12",
+        "date": "2026-10-06",
+        "patient": "P THREE",
+        "doctor": "dr b",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 2,
+            "amount": 100,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 13,
+        "bill_no": "B13",
+        "date": "2026-10-07",
+        "patient": "P FOUR",
+        "doctor": "DR A",
+        "total_amount": 60,
+        "items": [
+          {
+            "medicine_id": 23,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S2",
+            "qty": 1,
+            "amount": 60,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 14,
+        "bill_no": "B14",
+        "date": "2026-10-07",
+        "patient": "P FIVE",
+        "doctor": "",
+        "total_amount": 45,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 24,
+            "name": "INJ Q",
+            "type": "Injection - Vial",
+            "batch": "Q1",
+            "qty": 1,
+            "amount": 40,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 21,
+        "qty": 4,
+        "free_qty": 1,
+        "item_amount": 125,
+        "units": 1
+      },
+      {
+        "medicine_id": 22,
+        "qty": 5,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 10
+      },
+      {
+        "medicine_id": 23,
+        "qty": 2,
+        "free_qty": 0,
+        "item_amount": 80,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [
+        {
+          "date": "2026-10-07",
+          "patient": "P FIVE",
+          "doctor": "(No doctor)",
+          "bill_no": "B14",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "qty": 1,
+          "sale_rate": 25,
+          "purchase_rate": 25,
+          "basis": "scheme",
+          "amount": 25,
+          "cost": 25,
+          "profit": 0,
+          "pct": 10,
+          "commission": 2.5,
+          "remaining": -2.5,
+          "flags": []
+        },
+        {
+          "date": "2026-10-05",
+          "patient": "P ONE",
+          "doctor": "DR A",
+          "bill_no": "B10",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "qty": 1,
+          "sale_rate": 50,
+          "purchase_rate": 25,
+          "basis": "scheme",
+          "amount": 50,
+          "cost": 25,
+          "profit": 25,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 20,
+          "flags": []
+        },
+        {
+          "date": "2026-10-05",
+          "patient": "P ONE",
+          "doctor": "DR A",
+          "bill_no": "B10",
+          "medicine_id": 22,
+          "name": "TAB T",
+          "type": "Tablet",
+          "batch": "T1",
+          "qty": 10,
+          "sale_rate": 5,
+          "purchase_rate": 2,
+          "basis": "scheme",
+          "amount": 50,
+          "cost": 20,
+          "profit": 30,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 25,
+          "flags": []
+        },
+        {
+          "date": "2026-10-06",
+          "patient": "P TWO",
+          "doctor": "DR A",
+          "bill_no": "B11",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "qty": 1,
+          "sale_rate": 50,
+          "purchase_rate": 25,
+          "basis": "scheme",
+          "amount": 50,
+          "cost": 25,
+          "profit": 25,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 20,
+          "flags": []
+        },
+        {
+          "date": "2026-10-07",
+          "patient": "P FOUR",
+          "doctor": "DR A",
+          "bill_no": "B13",
+          "medicine_id": 23,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S2",
+          "qty": 1,
+          "sale_rate": 60,
+          "purchase_rate": 40,
+          "basis": "scheme",
+          "amount": 60,
+          "cost": 40,
+          "profit": 20,
+          "pct": 10,
+          "commission": 6,
+          "remaining": 14,
+          "flags": []
+        },
+        {
+          "date": "2026-10-06",
+          "patient": "P THREE",
+          "doctor": "DR B",
+          "bill_no": "B12",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "qty": 2,
+          "sale_rate": 50,
+          "purchase_rate": 25,
+          "basis": "scheme",
+          "amount": 100,
+          "cost": 50,
+          "profit": 50,
+          "pct": 10,
+          "commission": 10,
+          "remaining": 40,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "(No doctor)",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "basis": "scheme",
+          "qty": 1,
+          "avg_sale_rate": 25,
+          "purchase_rate": 25,
+          "amount": 25,
+          "cost": 25,
+          "profit": 0,
+          "pct": 10,
+          "commission": 2.5,
+          "remaining": -2.5,
+          "flags": []
+        },
+        {
+          "doctor": "DR A",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "basis": "scheme",
+          "qty": 2,
+          "avg_sale_rate": 50,
+          "purchase_rate": 25,
+          "amount": 100,
+          "cost": 50,
+          "profit": 50,
+          "pct": 10,
+          "commission": 10,
+          "remaining": 40,
+          "flags": []
+        },
+        {
+          "doctor": "DR A",
+          "medicine_id": 23,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S2",
+          "basis": "scheme",
+          "qty": 1,
+          "avg_sale_rate": 60,
+          "purchase_rate": 40,
+          "amount": 60,
+          "cost": 40,
+          "profit": 20,
+          "pct": 10,
+          "commission": 6,
+          "remaining": 14,
+          "flags": []
+        },
+        {
+          "doctor": "DR A",
+          "medicine_id": 22,
+          "name": "TAB T",
+          "type": "Tablet",
+          "batch": "T1",
+          "basis": "scheme",
+          "qty": 10,
+          "avg_sale_rate": 5,
+          "purchase_rate": 2,
+          "amount": 50,
+          "cost": 20,
+          "profit": 30,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 25,
+          "flags": []
+        },
+        {
+          "doctor": "DR B",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "basis": "scheme",
+          "qty": 2,
+          "avg_sale_rate": 50,
+          "purchase_rate": 25,
+          "amount": 100,
+          "cost": 50,
+          "profit": 50,
+          "pct": 10,
+          "commission": 10,
+          "remaining": 40,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "(No doctor)",
+          "qty": 1,
+          "amount": 25,
+          "cost": 25,
+          "commission": 2.5,
+          "profit": 0,
+          "remaining": -2.5
+        },
+        {
+          "doctor": "DR A",
+          "qty": 13,
+          "amount": 210,
+          "cost": 110,
+          "commission": 21,
+          "profit": 100,
+          "remaining": 79
+        },
+        {
+          "doctor": "DR B",
+          "qty": 2,
+          "amount": 100,
+          "cost": 50,
+          "commission": 10,
+          "profit": 50,
+          "remaining": 40
+        }
+      ],
+      "totals": {
+        "qty": 16,
+        "amount": 335,
+        "cost": 185,
+        "commission": 33.5,
+        "profit": 150,
+        "remaining": 116.5
+      }
+    }
+  },
+  {
+    "name": "E one doctor",
+    "sales": [
+      {
+        "id": 10,
+        "bill_no": "B10",
+        "date": "2026-10-05",
+        "patient": "P ONE",
+        "doctor": "DR A",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 22,
+            "name": "TAB T",
+            "type": "Tablet",
+            "batch": "T1",
+            "qty": 10,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 11,
+        "bill_no": "B11",
+        "date": "2026-10-06",
+        "patient": "P TWO",
+        "doctor": "DR A",
+        "total_amount": 50,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 12,
+        "bill_no": "B12",
+        "date": "2026-10-06",
+        "patient": "P THREE",
+        "doctor": "dr b",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 2,
+            "amount": 100,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 13,
+        "bill_no": "B13",
+        "date": "2026-10-07",
+        "patient": "P FOUR",
+        "doctor": "DR A",
+        "total_amount": 60,
+        "items": [
+          {
+            "medicine_id": 23,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S2",
+            "qty": 1,
+            "amount": 60,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 14,
+        "bill_no": "B14",
+        "date": "2026-10-07",
+        "patient": "P FIVE",
+        "doctor": "",
+        "total_amount": 45,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 24,
+            "name": "INJ Q",
+            "type": "Injection - Vial",
+            "batch": "Q1",
+            "qty": 1,
+            "amount": 40,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 21,
+        "qty": 4,
+        "free_qty": 1,
+        "item_amount": 125,
+        "units": 1
+      },
+      {
+        "medicine_id": 22,
+        "qty": 5,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 10
+      },
+      {
+        "medicine_id": 23,
+        "qty": 2,
+        "free_qty": 0,
+        "item_amount": 80,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10,
+      "doctor": "dr a"
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [
+        {
+          "date": "2026-10-05",
+          "patient": "P ONE",
+          "doctor": "DR A",
+          "bill_no": "B10",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "qty": 1,
+          "sale_rate": 50,
+          "purchase_rate": 25,
+          "basis": "scheme",
+          "amount": 50,
+          "cost": 25,
+          "profit": 25,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 20,
+          "flags": []
+        },
+        {
+          "date": "2026-10-05",
+          "patient": "P ONE",
+          "doctor": "DR A",
+          "bill_no": "B10",
+          "medicine_id": 22,
+          "name": "TAB T",
+          "type": "Tablet",
+          "batch": "T1",
+          "qty": 10,
+          "sale_rate": 5,
+          "purchase_rate": 2,
+          "basis": "scheme",
+          "amount": 50,
+          "cost": 20,
+          "profit": 30,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 25,
+          "flags": []
+        },
+        {
+          "date": "2026-10-06",
+          "patient": "P TWO",
+          "doctor": "DR A",
+          "bill_no": "B11",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "qty": 1,
+          "sale_rate": 50,
+          "purchase_rate": 25,
+          "basis": "scheme",
+          "amount": 50,
+          "cost": 25,
+          "profit": 25,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 20,
+          "flags": []
+        },
+        {
+          "date": "2026-10-07",
+          "patient": "P FOUR",
+          "doctor": "DR A",
+          "bill_no": "B13",
+          "medicine_id": 23,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S2",
+          "qty": 1,
+          "sale_rate": 60,
+          "purchase_rate": 40,
+          "basis": "scheme",
+          "amount": 60,
+          "cost": 40,
+          "profit": 20,
+          "pct": 10,
+          "commission": 6,
+          "remaining": 14,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "DR A",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "basis": "scheme",
+          "qty": 2,
+          "avg_sale_rate": 50,
+          "purchase_rate": 25,
+          "amount": 100,
+          "cost": 50,
+          "profit": 50,
+          "pct": 10,
+          "commission": 10,
+          "remaining": 40,
+          "flags": []
+        },
+        {
+          "doctor": "DR A",
+          "medicine_id": 23,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S2",
+          "basis": "scheme",
+          "qty": 1,
+          "avg_sale_rate": 60,
+          "purchase_rate": 40,
+          "amount": 60,
+          "cost": 40,
+          "profit": 20,
+          "pct": 10,
+          "commission": 6,
+          "remaining": 14,
+          "flags": []
+        },
+        {
+          "doctor": "DR A",
+          "medicine_id": 22,
+          "name": "TAB T",
+          "type": "Tablet",
+          "batch": "T1",
+          "basis": "scheme",
+          "qty": 10,
+          "avg_sale_rate": 5,
+          "purchase_rate": 2,
+          "amount": 50,
+          "cost": 20,
+          "profit": 30,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 25,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "DR A",
+          "qty": 13,
+          "amount": 210,
+          "cost": 110,
+          "commission": 21,
+          "profit": 100,
+          "remaining": 79
+        }
+      ],
+      "totals": {
+        "qty": 13,
+        "amount": 210,
+        "cost": 110,
+        "commission": 21,
+        "profit": 100,
+        "remaining": 79
+      }
+    }
+  },
+  {
+    "name": "E chosen types only",
+    "sales": [
+      {
+        "id": 10,
+        "bill_no": "B10",
+        "date": "2026-10-05",
+        "patient": "P ONE",
+        "doctor": "DR A",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 22,
+            "name": "TAB T",
+            "type": "Tablet",
+            "batch": "T1",
+            "qty": 10,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 11,
+        "bill_no": "B11",
+        "date": "2026-10-06",
+        "patient": "P TWO",
+        "doctor": "DR A",
+        "total_amount": 50,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 12,
+        "bill_no": "B12",
+        "date": "2026-10-06",
+        "patient": "P THREE",
+        "doctor": "dr b",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 2,
+            "amount": 100,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 13,
+        "bill_no": "B13",
+        "date": "2026-10-07",
+        "patient": "P FOUR",
+        "doctor": "DR A",
+        "total_amount": 60,
+        "items": [
+          {
+            "medicine_id": 23,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S2",
+            "qty": 1,
+            "amount": 60,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 14,
+        "bill_no": "B14",
+        "date": "2026-10-07",
+        "patient": "P FIVE",
+        "doctor": "",
+        "total_amount": 45,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 24,
+            "name": "INJ Q",
+            "type": "Injection - Vial",
+            "batch": "Q1",
+            "qty": 1,
+            "amount": 40,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 21,
+        "qty": 4,
+        "free_qty": 1,
+        "item_amount": 125,
+        "units": 1
+      },
+      {
+        "medicine_id": 22,
+        "qty": 5,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 10
+      },
+      {
+        "medicine_id": 23,
+        "qty": 2,
+        "free_qty": 0,
+        "item_amount": 80,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10,
+      "types": [
+        "Tablet"
+      ]
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [
+        {
+          "date": "2026-10-05",
+          "patient": "P ONE",
+          "doctor": "DR A",
+          "bill_no": "B10",
+          "medicine_id": 22,
+          "name": "TAB T",
+          "type": "Tablet",
+          "batch": "T1",
+          "qty": 10,
+          "sale_rate": 5,
+          "purchase_rate": 2,
+          "basis": "scheme",
+          "amount": 50,
+          "cost": 20,
+          "profit": 30,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 25,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "DR A",
+          "medicine_id": 22,
+          "name": "TAB T",
+          "type": "Tablet",
+          "batch": "T1",
+          "basis": "scheme",
+          "qty": 10,
+          "avg_sale_rate": 5,
+          "purchase_rate": 2,
+          "amount": 50,
+          "cost": 20,
+          "profit": 30,
+          "pct": 10,
+          "commission": 5,
+          "remaining": 25,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "DR A",
+          "qty": 10,
+          "amount": 50,
+          "cost": 20,
+          "commission": 5,
+          "profit": 30,
+          "remaining": 25
+        }
+      ],
+      "totals": {
+        "qty": 10,
+        "amount": 50,
+        "cost": 20,
+        "commission": 5,
+        "profit": 30,
+        "remaining": 25
+      }
+    }
+  },
+  {
+    "name": "E injection report, all injection types",
+    "sales": [
+      {
+        "id": 10,
+        "bill_no": "B10",
+        "date": "2026-10-05",
+        "patient": "P ONE",
+        "doctor": "DR A",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 22,
+            "name": "TAB T",
+            "type": "Tablet",
+            "batch": "T1",
+            "qty": 10,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 11,
+        "bill_no": "B11",
+        "date": "2026-10-06",
+        "patient": "P TWO",
+        "doctor": "DR A",
+        "total_amount": 50,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 12,
+        "bill_no": "B12",
+        "date": "2026-10-06",
+        "patient": "P THREE",
+        "doctor": "dr b",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 2,
+            "amount": 100,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 13,
+        "bill_no": "B13",
+        "date": "2026-10-07",
+        "patient": "P FOUR",
+        "doctor": "DR A",
+        "total_amount": 60,
+        "items": [
+          {
+            "medicine_id": 23,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S2",
+            "qty": 1,
+            "amount": 60,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 14,
+        "bill_no": "B14",
+        "date": "2026-10-07",
+        "patient": "P FIVE",
+        "doctor": "",
+        "total_amount": 45,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 24,
+            "name": "INJ Q",
+            "type": "Injection - Vial",
+            "batch": "Q1",
+            "qty": 1,
+            "amount": 40,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 21,
+        "qty": 4,
+        "free_qty": 1,
+        "item_amount": 125,
+        "units": 1
+      },
+      {
+        "medicine_id": 22,
+        "qty": 5,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 10
+      },
+      {
+        "medicine_id": 23,
+        "qty": 2,
+        "free_qty": 0,
+        "item_amount": 80,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "injection"
+    },
+    "expect": {
+      "mode": "injection",
+      "pct": 100,
+      "rows": [
+        {
+          "date": "2026-10-07",
+          "patient": "P FIVE",
+          "doctor": "(No doctor)",
+          "bill_no": "B14",
+          "medicine_id": 24,
+          "name": "INJ Q",
+          "type": "Injection - Vial",
+          "batch": "Q1",
+          "qty": 1,
+          "sale_rate": 20,
+          "purchase_rate": 0,
+          "basis": "unavailable",
+          "amount": 20,
+          "cost": 0,
+          "profit": 20,
+          "pct": 100,
+          "commission": 20,
+          "remaining": 0,
+          "flags": [
+            "unavailable"
+          ]
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "(No doctor)",
+          "medicine_id": 24,
+          "name": "INJ Q",
+          "type": "Injection - Vial",
+          "batch": "Q1",
+          "basis": "unavailable",
+          "qty": 1,
+          "avg_sale_rate": 20,
+          "purchase_rate": 0,
+          "amount": 20,
+          "cost": 0,
+          "profit": 20,
+          "pct": 100,
+          "commission": 20,
+          "remaining": 0,
+          "flags": [
+            "unavailable"
+          ]
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "(No doctor)",
+          "qty": 1,
+          "amount": 20,
+          "cost": 0,
+          "commission": 20,
+          "profit": 20,
+          "remaining": 0
+        }
+      ],
+      "totals": {
+        "qty": 1,
+        "amount": 20,
+        "cost": 0,
+        "commission": 20,
+        "profit": 20,
+        "remaining": 0
+      }
+    }
+  },
+  {
+    "name": "E bill discount, a return, estimated and unavailable cost",
+    "sales": [
+      {
+        "id": 20,
+        "bill_no": "B20",
+        "date": "2026-10-08",
+        "patient": "P SIX",
+        "doctor": "DR A",
+        "total_amount": 180,
+        "items": [
+          {
+            "medicine_id": 31,
+            "name": "OINT O",
+            "type": "Ointment",
+            "batch": "O1",
+            "qty": 2,
+            "amount": 100,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 32,
+            "name": "DROP D",
+            "type": "Drops",
+            "batch": "D1",
+            "qty": 4,
+            "amount": 100,
+            "cost_price": 12
+          }
+        ],
+        "returns": [
+          {
+            "medicine_id": 31,
+            "qty": 1
+          }
+        ]
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 31,
+        "qty": 2,
+        "free_qty": 0,
+        "item_amount": 60,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [
+        {
+          "date": "2026-10-08",
+          "patient": "P SIX",
+          "doctor": "DR A",
+          "bill_no": "B20",
+          "medicine_id": 31,
+          "name": "OINT O",
+          "type": "Ointment",
+          "batch": "O1",
+          "qty": 1,
+          "sale_rate": 45,
+          "purchase_rate": 30,
+          "basis": "scheme",
+          "amount": 45,
+          "cost": 30,
+          "profit": 15,
+          "pct": 10,
+          "commission": 4.5,
+          "remaining": 10.5,
+          "flags": []
+        },
+        {
+          "date": "2026-10-08",
+          "patient": "P SIX",
+          "doctor": "DR A",
+          "bill_no": "B20",
+          "medicine_id": 32,
+          "name": "DROP D",
+          "type": "Drops",
+          "batch": "D1",
+          "qty": 4,
+          "sale_rate": 22.5,
+          "purchase_rate": 12,
+          "basis": "estimated",
+          "amount": 90,
+          "cost": 48,
+          "profit": 42,
+          "pct": 10,
+          "commission": 9,
+          "remaining": 33,
+          "flags": [
+            "estimated"
+          ]
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "DR A",
+          "medicine_id": 32,
+          "name": "DROP D",
+          "type": "Drops",
+          "batch": "D1",
+          "basis": "estimated",
+          "qty": 4,
+          "avg_sale_rate": 22.5,
+          "purchase_rate": 12,
+          "amount": 90,
+          "cost": 48,
+          "profit": 42,
+          "pct": 10,
+          "commission": 9,
+          "remaining": 33,
+          "flags": [
+            "estimated"
+          ]
+        },
+        {
+          "doctor": "DR A",
+          "medicine_id": 31,
+          "name": "OINT O",
+          "type": "Ointment",
+          "batch": "O1",
+          "basis": "scheme",
+          "qty": 1,
+          "avg_sale_rate": 45,
+          "purchase_rate": 30,
+          "amount": 45,
+          "cost": 30,
+          "profit": 15,
+          "pct": 10,
+          "commission": 4.5,
+          "remaining": 10.5,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "DR A",
+          "qty": 5,
+          "amount": 135,
+          "cost": 78,
+          "commission": 13.5,
+          "profit": 57,
+          "remaining": 43.5
+        }
+      ],
+      "totals": {
+        "qty": 5,
+        "amount": 135,
+        "cost": 78,
+        "commission": 13.5,
+        "profit": 57,
+        "remaining": 43.5
+      }
+    }
+  },
+  {
+    "name": "E no doctor on the bill",
+    "sales": [
+      {
+        "id": 10,
+        "bill_no": "B10",
+        "date": "2026-10-05",
+        "patient": "P ONE",
+        "doctor": "DR A",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 22,
+            "name": "TAB T",
+            "type": "Tablet",
+            "batch": "T1",
+            "qty": 10,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 11,
+        "bill_no": "B11",
+        "date": "2026-10-06",
+        "patient": "P TWO",
+        "doctor": "DR A",
+        "total_amount": 50,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 12,
+        "bill_no": "B12",
+        "date": "2026-10-06",
+        "patient": "P THREE",
+        "doctor": "dr b",
+        "total_amount": 100,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 2,
+            "amount": 100,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 13,
+        "bill_no": "B13",
+        "date": "2026-10-07",
+        "patient": "P FOUR",
+        "doctor": "DR A",
+        "total_amount": 60,
+        "items": [
+          {
+            "medicine_id": 23,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S2",
+            "qty": 1,
+            "amount": 60,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      },
+      {
+        "id": 14,
+        "bill_no": "B14",
+        "date": "2026-10-07",
+        "patient": "P FIVE",
+        "doctor": "",
+        "total_amount": 45,
+        "items": [
+          {
+            "medicine_id": 21,
+            "name": "SYRUP S",
+            "type": "Syrup",
+            "batch": "S1",
+            "qty": 1,
+            "amount": 50,
+            "cost_price": 0
+          },
+          {
+            "medicine_id": 24,
+            "name": "INJ Q",
+            "type": "Injection - Vial",
+            "batch": "Q1",
+            "qty": 1,
+            "amount": 40,
+            "cost_price": 0
+          }
+        ],
+        "returns": []
+      }
+    ],
+    "purchases": [
+      {
+        "medicine_id": 21,
+        "qty": 4,
+        "free_qty": 1,
+        "item_amount": 125,
+        "units": 1
+      },
+      {
+        "medicine_id": 22,
+        "qty": 5,
+        "free_qty": 0,
+        "item_amount": 100,
+        "units": 10
+      },
+      {
+        "medicine_id": 23,
+        "qty": 2,
+        "free_qty": 0,
+        "item_amount": 80,
+        "units": 1
+      }
+    ],
+    "opts": {
+      "mode": "regular",
+      "pct": 10,
+      "doctor": "(No doctor)"
+    },
+    "expect": {
+      "mode": "regular",
+      "pct": 10,
+      "rows": [
+        {
+          "date": "2026-10-07",
+          "patient": "P FIVE",
+          "doctor": "(No doctor)",
+          "bill_no": "B14",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "qty": 1,
+          "sale_rate": 25,
+          "purchase_rate": 25,
+          "basis": "scheme",
+          "amount": 25,
+          "cost": 25,
+          "profit": 0,
+          "pct": 10,
+          "commission": 2.5,
+          "remaining": -2.5,
+          "flags": []
+        }
+      ],
+      "summary": [
+        {
+          "doctor": "(No doctor)",
+          "medicine_id": 21,
+          "name": "SYRUP S",
+          "type": "Syrup",
+          "batch": "S1",
+          "basis": "scheme",
+          "qty": 1,
+          "avg_sale_rate": 25,
+          "purchase_rate": 25,
+          "amount": 25,
+          "cost": 25,
+          "profit": 0,
+          "pct": 10,
+          "commission": 2.5,
+          "remaining": -2.5,
+          "flags": []
+        }
+      ],
+      "doctors": [
+        {
+          "doctor": "(No doctor)",
+          "qty": 1,
+          "amount": 25,
+          "cost": 25,
+          "commission": 2.5,
+          "profit": 0,
+          "remaining": -2.5
+        }
+      ],
+      "totals": {
+        "qty": 1,
+        "amount": 25,
+        "cost": 25,
+        "commission": 2.5,
+        "profit": 0,
+        "remaining": -2.5
+      }
+    }
+  }
+]

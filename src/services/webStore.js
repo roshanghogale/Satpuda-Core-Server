@@ -20,6 +20,7 @@ import { isStripCountType, parseTabletsPerStripe } from '../utils/saleProfit.js'
 import { audit } from './webUsers.js';
 import { partyBillClearing } from './partyDueCascade.js';
 import { cleanAllocations } from './billClearing.js';
+import { doctorMargin, NO_DOCTOR } from './doctorMargin.js';
 import { displayPurchaseNo, displaySalesBillNo } from '../utils/fy.js';
 
 const r2 = (x) => pyRound(x, 2);
@@ -1228,4 +1229,77 @@ export async function editMedicine(storePk, user, id, body) {
       detail: { changed, stock_adjust: adjust || undefined, lines: result.lines_updated || undefined } };
   });
   return { saved: true, lines_updated: result?.lines_updated || null, note: result?.lines_note || '', stock_adjust: adjust };
+}
+
+// ─── Doctor Margin Report (owner, 17 Oct 2026; Sales History -> Export) ───────────────
+
+/** Doctors and medicine types for the report's filters. */
+export async function doctorMarginOptions(storePk) {
+  const [{ rows: docs }, { rows: billDocs }, { rows: types }] = await Promise.all([
+    query(`SELECT DISTINCT UPPER(BTRIM(name)) AS name FROM doctors WHERE store_pk=$1 AND NOT deleted AND BTRIM(COALESCE(name,'')) <> ''`, [storePk]),
+    query(`SELECT DISTINCT UPPER(BTRIM(doctor_name)) AS name FROM sales WHERE store_pk=$1 AND NOT deleted AND BTRIM(COALESCE(doctor_name,'')) <> ''`, [storePk]),
+    query(`SELECT DISTINCT BTRIM(type) AS type FROM medicines WHERE store_pk=$1 AND NOT deleted AND BTRIM(COALESCE(type,'')) <> '' ORDER BY 1`, [storePk]),
+  ]);
+  const doctors = [...new Set([...docs, ...billDocs].map((r) => r.name))].sort();
+  return { doctors: [...doctors, NO_DOCTOR], types: types.map((r) => r.type) };
+}
+
+/**
+ * The report for the dates and filters: the books are read here, the figures come from
+ * doctorMargin.js (the rule the PC and the phone share).
+ */
+export async function doctorMarginReport(storePk, q = {}) {
+  const from = String(q.from || todayIst()).slice(0, 10);
+  const to = String(q.to || todayIst()).slice(0, 10);
+  if (from > to) throw new AppError(400, 'From date is after To date.');
+  const types = String(q.types || '').split(',').map((t) => t.trim()).filter(Boolean);
+  const opts = { mode: q.mode === 'injection' ? 'injection' : 'regular', pct: q.pct === undefined || q.pct === '' ? 10 : Number(q.pct),
+    types: types.length ? types : null, doctor: String(q.doctor || '') };
+  if (!(opts.pct >= 0 && opts.pct <= 100)) throw new AppError(400, 'Doctor commission must be 0 to 100 %.');
+  const { rows: bills } = await query(
+    `SELECT id, local_id, bill_no, bill_date::text AS d, customer_name, doctor_name, COALESCE(total_amount,0)::float AS total
+       FROM sales WHERE store_pk=$1 AND NOT deleted AND NOT COALESCE(is_autosave,false) AND bill_date BETWEEN $2 AND $3`,
+    [storePk, from, to],
+  );
+  if (!bills.length) return { from, to, opts, ...doctorMargin([], [], opts) };
+  const pks = bills.map((b) => Number(b.id));
+  const lids = bills.map((b) => Number(b.local_id));
+  const [{ rows: items }, { rows: rets }] = await Promise.all([
+    query(
+      `SELECT si.sale_id, si.medicine_id, COALESCE(si.name, m.name) AS name, COALESCE(NULLIF(si.type,''), m.type) AS type,
+              COALESCE(NULLIF(si.batch_no,''), m.batch_no) AS batch, COALESCE(si.qty,0)::float AS qty,
+              COALESCE(si.amount,0)::float AS amount, COALESCE(si.cost_price,0)::float AS cost_price
+         FROM sales_items si LEFT JOIN medicines m ON m.store_pk=$1 AND m.local_id=si.medicine_id
+        WHERE si.sale_id = ANY($2::bigint[]) ORDER BY si.id`,
+      [storePk, pks],
+    ),
+    query(
+      `SELECT sr.sale_id, sri.medicine_id, SUM(sri.qty)::float AS qty
+         FROM sales_returns sr JOIN sales_return_items sri ON sri.return_id = sr.id
+        WHERE sr.store_pk=$1 AND NOT sr.deleted AND sr.sale_id = ANY($2::bigint[])
+        GROUP BY sr.sale_id, sri.medicine_id`,
+      [storePk, lids],
+    ),
+  ]);
+  const mids = [...new Set(items.map((i) => Number(i.medicine_id)).filter((v) => v > 0))];
+  const { rows: plines } = mids.length ? await query(
+    `SELECT pi.medicine_id, COALESCE(pi.qty,0)::float AS qty, COALESCE(pi.free_qty,0)::float AS free_qty,
+            COALESCE(pi.item_amount,0)::float AS item_amount, COALESCE(m.type, pi.type) AS type,
+            COALESCE(NULLIF(m.unit,''), pi.unit) AS unit
+       FROM purchase_items pi JOIN purchases p ON p.id = pi.purchase_id
+       LEFT JOIN medicines m ON m.store_pk=$1 AND m.local_id=pi.medicine_id
+      WHERE p.store_pk=$1 AND NOT p.deleted AND NOT COALESCE(p.is_autosave,false) AND pi.medicine_id = ANY($2::bigint[])`,
+    [storePk, mids],
+  ) : { rows: [] };
+  const byPk = new Map(bills.map((b) => [Number(b.id), { id: Number(b.local_id), bill_no: displaySalesBillNo(b.bill_no), date: b.d,
+    patient: b.customer_name || '', doctor: b.doctor_name || '', total_amount: b.total, items: [], returns: [] }]));
+  const byLid = new Map([...byPk.values()].map((s) => [s.id, s]));
+  for (const it of items) {
+    byPk.get(Number(it.sale_id))?.items.push({ medicine_id: Number(it.medicine_id), name: it.name || '', type: it.type || '',
+      batch: it.batch || '', qty: it.qty, amount: it.amount, cost_price: it.cost_price });
+  }
+  for (const r of rets) byLid.get(Number(r.sale_id))?.returns.push({ medicine_id: Number(r.medicine_id), qty: r.qty });
+  const purchases = plines.map((p) => ({ medicine_id: Number(p.medicine_id), qty: p.qty, free_qty: p.free_qty, item_amount: p.item_amount,
+    units: isStripCountType(p.type, p.unit) ? Math.max(1, parseTabletsPerStripe(p.unit)) : 1 }));
+  return { from, to, opts, ...doctorMargin([...byPk.values()], purchases, opts) };
 }

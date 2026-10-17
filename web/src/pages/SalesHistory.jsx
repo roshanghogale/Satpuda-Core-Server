@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, fmtDate, money, monthStartIso, qs, shortNo, todayIso } from '../api.js';
 import { BillPrint, PayDue, printNow, useDebounced } from './common.jsx';
+import DoctorMargin from './DoctorMargin.jsx';
 
 function ReturnForm({ sale, onDone }) {
   const [data, setData] = useState(null);
@@ -49,6 +50,7 @@ export default function SalesHistory({ me, can }) {
   const [mode, setMode] = useState('view');
   const [msg, setMsg] = useState('');
   const [error, setError] = useState('');
+  const [doctorReport, setDoctorReport] = useState(false);
 
   const load = () => api(`/sales${qs({ from, to, q: dq })}`).then(setData).catch((e) => setError(e.message));
   useEffect(() => { load(); // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -74,6 +76,7 @@ export default function SalesHistory({ me, can }) {
           <label>From<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
           <label>To<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
           <label className="grow">Search<input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Bill no, customer, doctor" /></label>
+          <button className="btn" onClick={() => setDoctorReport(true)}>Export: Doctor margin report</button>
         </div>
         {sum && <div className="tiles">
           <div><span>Bills</span><b>{sum.bills}</b></div>
@@ -125,6 +128,7 @@ export default function SalesHistory({ me, can }) {
           </div>
         )}
       </div>
+      {doctorReport && <DoctorMargin from={from} to={to} onClose={() => setDoctorReport(false)} />}
     </div>
   );
 }

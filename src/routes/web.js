@@ -190,6 +190,13 @@ router.get('/suppliers/:id/open-returns', needAny('purchase_entry', 'parties'), 
 router.get('/suppliers/:id/open-bills', needAny('parties', 'payments'), asyncHandler(async (req, res) => {
   ok(res, await store.openBills(req.web.storePk, 'supplier', req.params.id));
 }));
+// Doctor Margin Report (Sales History -> Export): filters, then the report.
+router.get('/reports/doctor-margin/options', needAny('sales_view', 'reports'), asyncHandler(async (req, res) => {
+  ok(res, await store.doctorMarginOptions(req.web.storePk));
+}));
+router.get('/reports/doctor-margin', needAny('sales_view', 'reports'), asyncHandler(async (req, res) => {
+  ok(res, await store.doctorMarginReport(req.web.storePk, req.query));
+}));
 router.get('/payments/report', need('parties'), asyncHandler(async (req, res) => {
   ok(res, await store.paymentReport(req.web.storePk, req.query));
 }));

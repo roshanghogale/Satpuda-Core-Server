@@ -149,3 +149,12 @@ input.num { width: 72px; text-align: right; padding: 4px 6px; }
 .ret-line td { font-style: italic; }
 .ret-total td { font-weight: 700; border-top: 1px solid currentColor; }
 .center { text-align: center; }
+
+/* Doctor Margin Report */
+.wide-modal { max-width: 1180px; }
+.dm-types { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin: 8px 0; }
+.dm-type-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 2px 10px; margin-top: 6px; }
+.dm-scroll { overflow-x: auto; }
+.dm-report .tiles { margin: 10px 0; }
+tr.dm-loss td { color: #b91c1c; }
+@media print { .wide-modal { max-width: none; } .dm-scroll { overflow: visible; } .dm-report table { font-size: 10px; } }

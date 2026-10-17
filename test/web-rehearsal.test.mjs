@@ -285,6 +285,24 @@ await okCall('DELETE', `/api/web/sales/${c2.id}`, { token: owner });
 assert.equal((await okCall('GET', `/api/web/customers/${rc.id}/open-returns`, { token: owner })).length, 1, 'deleting the bill frees the credit');
 step(`return ${ret2.return_no} kept as credit is offered and settled in bill ${c2.bill_no} (Return row, owes ${(c2.sale.total_amount - c2.returns_applied).toFixed(2)})`);
 
+// Doctor Margin Report (owner, 17 Oct 2026): this run's bills by doctor, both styles agree,
+// the summary carries no patient names, the injection report never uses the percentage.
+const dmOpts = await okCall('GET', '/api/web/reports/doctor-margin/options', { token: owner });
+assert.ok(dmOpts.doctors.includes('(No doctor)'));
+const day = new Date().toISOString().slice(0, 10);
+const dmA = await okCall('GET', `/api/web/reports/doctor-margin?from=2026-04-01&to=${day}&pct=10`, { token: owner });
+const dmB = await okCall('GET', `/api/web/reports/doctor-margin?from=2026-04-01&to=${day}&pct=15`, { token: owner });
+assert.ok(dmA.rows.length > 0);
+assert.ok(Math.abs(dmA.totals.commission * 1.5 - dmB.totals.commission) < 0.05, 'commission follows the percentage');
+const sumOf = (list, k) => list.reduce((x, r) => x + r[k], 0);
+assert.ok(Math.abs(sumOf(dmA.rows, 'amount') - sumOf(dmA.summary, 'amount')) < 0.01, 'summary = detailed');
+assert.ok(!JSON.stringify(dmA.summary).includes(`WEB CUSTOMER ${tag}`), 'no patient in the summary');
+const dmInj = await okCall('GET', `/api/web/reports/doctor-margin?from=2026-04-01&to=${day}&mode=injection&pct=50`, { token: owner });
+assert.equal(dmInj.pct, 100);
+assert.ok(dmInj.rows.every((r) => /inj/i.test(r.type)));
+assert.equal((await call('GET', `/api/web/reports/doctor-margin?from=${day}&to=2026-04-01`, { token: owner })).status, 400);
+step(`doctor margin report: ${dmA.rows.length} lines, 10% -> 15% scales the commission, styles reconcile, injection uses 100% of profit`);
+
 // Walk-in (owner, 9 Oct 2026): no customer name = the shop's COUNTER SALE customer, paid in full.
 const walk = await okCall('POST', '/api/web/sales', { token: staff, body: { items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 80 } });
 assert.equal(walk.sale.customer_name, 'COUNTER SALE');
