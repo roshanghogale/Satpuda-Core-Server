@@ -262,6 +262,29 @@ assert.ok(rep3.rows.find((p) => Number(p.id) === Number(chosen.id)).cleared.ever
 await okCall('DELETE', `/api/web/sales/${b1.id}`, { token: owner });
 step(`payment given to the newer bill ${b2.bill_no} clears it, ${b1.bill_no} keeps its due; report shows chosen / oldest / credit`);
 
+// Returns as credit settled in the next bill (owner, 17 Oct 2026): a return kept as credit is
+// offered when billing that customer; the new bill shows it and owes only the rest.
+const rcName = `WEB RET CREDIT ${tag}`;
+const c1 = await okCall('POST', '/api/web/sales', { token: owner, body: { customer_name: rcName, items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 80 } });
+assert.equal(c1.sale.due_amount, 0);
+const rc = (await okCall('GET', `/api/web/customers?q=${encodeURIComponent(rcName)}`, { token: owner })).rows[0];
+const ret2 = await okCall('POST', '/api/web/returns/sales', { token: owner, body: { sale_id: c1.id, items: [{ medicine_id: syr.id, qty: 1 }] } });
+const offered = await okCall('GET', `/api/web/customers/${rc.id}/open-returns`, { token: owner });
+assert.deepEqual(offered.map((r) => [r.return_no, r.left]), [[ret2.return_no, ret2.refund_amount]]);
+assert.equal(offered[0].items[0].qty, 1);
+const c2 = await okCall('POST', '/api/web/sales', { token: owner, body: { customer_id: rc.id, customer_name: rcName,
+  items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 0, apply_returns: [ret2.id] } });
+assert.equal(c2.returns_applied, Math.min(ret2.refund_amount, c2.sale.total_amount));
+const c2d = await okCall('GET', `/api/web/sales/${c2.id}`, { token: owner });
+assert.deepEqual(c2d.returns_in_bill.map((r) => [r.return_no, r.amount]), [[ret2.return_no, c2.returns_applied]]);
+assert.ok(Math.abs(Number(c2d.total_due) - (c2.sale.total_amount - c2.returns_applied)) < 0.01, JSON.stringify({ d: c2d.total_due }));
+assert.deepEqual(await okCall('GET', `/api/web/customers/${rc.id}/open-returns`, { token: owner }), []);
+const staffRets = await call('GET', `/api/web/customers/${rc.id}/open-returns`, { token: staff });
+assert.equal(staffRets.status, 200, 'billing staff see the return credit');
+await okCall('DELETE', `/api/web/sales/${c2.id}`, { token: owner });
+assert.equal((await okCall('GET', `/api/web/customers/${rc.id}/open-returns`, { token: owner })).length, 1, 'deleting the bill frees the credit');
+step(`return ${ret2.return_no} kept as credit is offered and settled in bill ${c2.bill_no} (Return row, owes ${(c2.sale.total_amount - c2.returns_applied).toFixed(2)})`);
+
 // Walk-in (owner, 9 Oct 2026): no customer name = the shop's COUNTER SALE customer, paid in full.
 const walk = await okCall('POST', '/api/web/sales', { token: staff, body: { items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 80 } });
 assert.equal(walk.sale.customer_name, 'COUNTER SALE');

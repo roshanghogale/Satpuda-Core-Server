@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { api, money, shortNo } from '../api.js';
+import { api, fmtDate, money, shortNo } from '../api.js';
 import { BillPrint, MedicineSearch, PartyPicker, printNow, useDebounced } from './common.jsx';
 
 /** New bill, or (with :id) edit of an old one. Totals come from the server's rules. */
@@ -20,6 +20,22 @@ export default function Billing({ me }) {
   const [saved, setSaved] = useState(null);
   const [version, setVersion] = useState(null);
   const [paidTouched, setPaidTouched] = useState(false);
+  // Returns of this customer whose credit is not used yet; the ticked ones are settled in
+  // this bill as Return rows (owner, 17 Oct 2026).
+  const [openRets, setOpenRets] = useState([]);
+  const [useRets, setUseRets] = useState([]);
+  const [askRets, setAskRets] = useState(false);
+
+  useEffect(() => {
+    setOpenRets([]); setUseRets([]); setAskRets(false);
+    if (id || !customer.id) return;
+    let live = true;
+    api(`/customers/${customer.id}/open-returns`).then((r) => {
+      if (!live || !r.length) return;
+      setOpenRets(r); setUseRets(r.map((x) => x.return_id)); setAskRets(true);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [customer.id, id]);
 
   useEffect(() => {
     if (!id) return;
@@ -43,7 +59,13 @@ export default function Billing({ me }) {
     customer_id: customer.id, customer_name: customer.name, customer_phone: phone, doctor_name: doctor,
     items: lines.map((l) => ({ medicine_id: l.medicine_id, qty: Number(l.qty) || 0, disc_pct: Number(l.disc_pct) || 0, gst_percent: l.gst_percent })),
     discount_pct: Number(discPct) || 0, cash_paid: Number(cash) || 0, online_paid: Number(online) || 0,
+    apply_returns: id ? undefined : useRets,
   };
+  const pickedRets = openRets.filter((r) => useRets.includes(r.return_id));
+  const billTotal = calc?.summary?.total_amount || 0;
+  // The server gives each return what it has left, never more than the bill leaves unpaid.
+  const retTotal = Math.round(Math.min(pickedRets.reduce((x, r) => x + r.left, 0), billTotal) * 100) / 100;
+  const netTotal = Math.round((billTotal - retTotal) * 100) / 100;
   const key = useDebounced(JSON.stringify({ ...body, cash_paid: 0, online_paid: 0, a: cash, b: online }), 250);
 
   useEffect(() => {
@@ -69,7 +91,7 @@ export default function Billing({ me }) {
     setBusy(true);
     setError('');
     try {
-      const paid = paidTouched ? body : { ...body, cash_paid: calc?.summary?.total_amount || 0 };
+      const paid = paidTouched ? body : { ...body, cash_paid: netTotal };
       const out = id
         ? await api(`/sales/${id}`, { method: 'PUT', body: { ...paid, version } })
         : await api('/sales', { method: 'POST', body: paid });
@@ -85,6 +107,7 @@ export default function Billing({ me }) {
   function fresh() {
     setSaved(null); setLines([]); setCustomer({ id: null, name: '' }); setPhone(''); setDoctor('');
     setDiscPct(''); setCash(''); setOnline(''); setCalc(null); setPaidTouched(false);
+    setOpenRets([]); setUseRets([]); setAskRets(false);
     if (id) nav('/billing');
   }
 
@@ -115,6 +138,9 @@ export default function Billing({ me }) {
           <label>Doctor<input value={doctor} onChange={(e) => setDoctor(e.target.value)} placeholder="needed for scheduled medicine" /></label>
         </div>
         {calc && Number(calc.previous_due) > 0 && <p className="warn small">Old due of this customer: ₹ {money(calc.previous_due)}</p>}
+        {openRets.length > 0 && !askRets && (
+          <p className="okmsg small">Return credit: {pickedRets.length ? `${pickedRets.map((r) => r.return_no).join(', ')} settled in this bill` : 'not used in this bill'}
+            {' '}<button className="btn small" onClick={() => setAskRets(true)}>Change</button></p>)}
       </div>
       <div className="card">
         <MedicineSearch onPick={addLine} autoFocus />
@@ -137,26 +163,63 @@ export default function Billing({ me }) {
               );
             })}
             {!lines.length && <tr><td colSpan={8} className="muted center">Search a medicine above and press Enter to add it.</td></tr>}
+            {pickedRets.map((r) => [
+              <tr key={`r${r.return_id}`} className="ret-head">
+                <td colSpan={6}>Return {r.return_no} {fmtDate(r.return_date)} <span className="muted small">(bill {r.bill_no}
+                  {r.left < r.amount - 0.009 ? ` · ₹ ${money(r.amount - r.left)} of ₹ ${money(r.amount)} already went to older dues` : ''})</span></td>
+                <td className="r">− {money(r.left)}</td><td />
+              </tr>,
+              ...r.items.map((it, j) => (
+                <tr key={`r${r.return_id}-${j}`} className="ret-line">
+                  <td colSpan={3}>{it.name}</td><td className="r">{it.qty}</td><td /><td />
+                  <td className="r">− {money(it.amount)}</td><td />
+                </tr>)),
+            ])}
           </tbody>
         </table>
       </div>
       <div className="card totals">
         <div className="grid4">
           <label>Bill discount %<input value={discPct} onChange={(e) => setDiscPct(e.target.value)} /></label>
-          <label>Cash paid<input value={cash} onChange={(e) => { setCash(e.target.value); setPaidTouched(true); }} placeholder={s ? money(s.total_amount) : ''} /></label>
+          <label>Cash paid<input value={cash} onChange={(e) => { setCash(e.target.value); setPaidTouched(true); }} placeholder={s ? money(netTotal) : ''} /></label>
           <label>Online paid<input value={online} onChange={(e) => { setOnline(e.target.value); setPaidTouched(true); }} /></label>
           <div className="sum">
             {s ? (
               <>
                 <div>Subtotal {money(s.subtotal)}{s.discount_amount ? ` − ${money(s.discount_amount)}` : ''}{calc.rounding ? ` · round ${money(calc.rounding)}` : ''}</div>
-                <div className="big">₹ {money(s.total_amount)}</div>
-                {paidTouched && due && due.due_amount > 0 && <div className="warn">Due on this bill: {money(due.due_amount)}</div>}
+                <div className={retTotal > 0 ? '' : 'big'}>{retTotal > 0 ? 'Total ' : ''}₹ {money(s.total_amount)}</div>
+                {retTotal > 0 && <div>Return total − ₹ {money(retTotal)}</div>}
+                {retTotal > 0 && <div className="big">Net to pay ₹ {money(netTotal)}</div>}
+                {paidTouched && retTotal > 0 && netTotal - (Number(cash) || 0) - (Number(online) || 0) > 0.009 && (
+                  <div className="warn">Due on this bill: {money(netTotal - (Number(cash) || 0) - (Number(online) || 0))}</div>)}
+                {paidTouched && !(retTotal > 0) && due && due.due_amount > 0 && <div className="warn">Due on this bill: {money(due.due_amount)}</div>}
                 {paidTouched && due && due.credit_amount > 0 && <div className="okmsg">Extra paid (credit): {money(due.credit_amount)}</div>}
               </>
             ) : <div className="muted">Totals appear here</div>}
           </div>
         </div>
         {!paidTouched && s && <p className="muted small">Leave Cash paid empty for a fully paid cash bill.</p>}
+        {askRets && (
+          <div className="modal-back" onClick={() => setAskRets(false)}>
+            <div className="modal narrow" onClick={(e) => e.stopPropagation()}>
+              <h3>{customer.name} has return credit</h3>
+              <p className="small">Tick the returns to settle in this bill. They show on the bill as Return rows and come off its total.</p>
+              <table className="grid compact">
+                <tbody>{openRets.map((r) => (
+                  <tr key={r.return_id}>
+                    <td><input type="checkbox" checked={useRets.includes(r.return_id)}
+                      onChange={(e) => setUseRets((u) => (e.target.checked ? [...u, r.return_id] : u.filter((x) => x !== r.return_id)))} /></td>
+                    <td>{r.return_no}<div className="muted small">{fmtDate(r.return_date)} · bill {r.bill_no}</div>
+                      <div className="muted small">{r.items.map((it) => `${it.name} × ${it.qty}`).join(', ')}</div></td>
+                    <td className="r">₹ {money(r.left)}</td>
+                  </tr>))}</tbody>
+              </table>
+              <div className="row end">
+                <button className="btn" onClick={() => { setUseRets([]); setAskRets(false); }}>Not in this bill</button>
+                <button className="btn primary" autoFocus onClick={() => setAskRets(false)}>Use ticked</button>
+              </div>
+            </div>
+          </div>)}
         {error && <div className="error">{error}</div>}
         <div className="row end">
           {id && <button className="btn" onClick={() => nav('/sales')}>Cancel</button>}

@@ -880,3 +880,11 @@ CREATE TABLE IF NOT EXISTS demo_users (
 -- bill_id is the sale's / purchase's local_id. NULL = clears oldest first, as before.
 ALTER TABLE customer_payments ADD COLUMN IF NOT EXISTS allocations JSONB;
 ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS allocations JSONB;
+
+-- Returns as party credit (owner, 17 Oct 2026). settle_mode: 'ledger' (kept as credit, the
+-- default) | 'cash' | 'online' (money handed back: a negative payment of its own).
+-- allocations: the bills the credit was used in, same shape as payments' allocations.
+ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS settle_mode TEXT;
+ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS allocations JSONB;
+ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS settle_mode TEXT;
+ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS allocations JSONB;

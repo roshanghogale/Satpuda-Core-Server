@@ -1295,6 +1295,12 @@ function allocationParams(doc) {
   return [list.length ? JSON.stringify(list) : null, true];
 }
 
+/** A return's settle mode, or null to keep the stored one (older apps send none). */
+function settleMode(doc) {
+  const m = String(doc.settle_mode || '').toLowerCase();
+  return ['ledger', 'cash', 'online'].includes(m) ? m : null;
+}
+
 async function upsertCustomerPayment(client, storePk, doc, hint = null) {
   const localId = await realPaymentLocalId(client, storePk, 'customer_payments', localIdOf(doc));
   const meta = syncMeta(doc);
@@ -1559,9 +1565,11 @@ async function upsertSalesReturn(client, storePk, doc, hint = null) {
     `INSERT INTO sales_returns (
        store_pk, local_id, return_no, sale_id, bill_no, customer_id, customer_name,
        return_date, refund_amount, discount, reason, item_count, created_at,
-       updated_at, version, device_id, deleted, sync_status
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       updated_at, version, device_id, deleted, sync_status, allocations, settle_mode
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$21)
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
+       allocations = CASE WHEN $20::boolean THEN EXCLUDED.allocations ELSE sales_returns.allocations END,
+       settle_mode = COALESCE(EXCLUDED.settle_mode, sales_returns.settle_mode),
        return_no=EXCLUDED.return_no, sale_id=EXCLUDED.sale_id, bill_no=EXCLUDED.bill_no,
        customer_id=EXCLUDED.customer_id, customer_name=EXCLUDED.customer_name,
        return_date=EXCLUDED.return_date, refund_amount=EXCLUDED.refund_amount,
@@ -1576,6 +1584,7 @@ async function upsertSalesReturn(client, storePk, doc, hint = null) {
       Number(doc.refund_amount || 0), Number(doc.discount || 0), doc.reason || null,
       Number(doc.item_count || (doc.items?.length || 0)), createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+      ...allocationParams(doc), settleMode(doc),
     ]
   );
   const retPk = result.rows[0].id;
@@ -1609,9 +1618,11 @@ async function upsertPurchaseReturn(client, storePk, doc, hint = null) {
     `INSERT INTO purchase_returns (
        store_pk, local_id, return_no, purchase_id, purchase_no, supplier_id, supplier_name,
        return_date, refund_amount, discount, reason, item_count, created_at,
-       updated_at, version, device_id, deleted, sync_status
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       updated_at, version, device_id, deleted, sync_status, allocations, settle_mode
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$21)
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
+       allocations = CASE WHEN $20::boolean THEN EXCLUDED.allocations ELSE purchase_returns.allocations END,
+       settle_mode = COALESCE(EXCLUDED.settle_mode, purchase_returns.settle_mode),
        return_no=EXCLUDED.return_no, purchase_id=EXCLUDED.purchase_id, purchase_no=EXCLUDED.purchase_no,
        supplier_id=EXCLUDED.supplier_id, supplier_name=EXCLUDED.supplier_name,
        return_date=EXCLUDED.return_date, refund_amount=EXCLUDED.refund_amount,
@@ -1626,6 +1637,7 @@ async function upsertPurchaseReturn(client, storePk, doc, hint = null) {
       Number(doc.refund_amount || 0), Number(doc.discount || 0), doc.reason || null,
       Number(doc.item_count || (doc.items?.length || 0)), createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+      ...allocationParams(doc), settleMode(doc),
     ]
   );
   const retPk = result.rows[0].id;
@@ -2467,14 +2479,14 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
     case 'sales_returns':
       sql = `SELECT id AS _pk, local_id AS id, return_no, sale_id, bill_no, customer_id, customer_name,
                     return_date, refund_amount, discount, reason, item_count, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations, settle_mode
              FROM sales_returns WHERE store_pk=$1${idFilter}${delClause}`;
       mapper = (rows) => attachReturnItems('sales_return_items', 'return_id', rows);
       break;
     case 'purchase_returns':
       sql = `SELECT id AS _pk, local_id AS id, return_no, purchase_id, purchase_no, supplier_id, supplier_name,
                     return_date, refund_amount, discount, reason, item_count, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations, settle_mode
              FROM purchase_returns WHERE store_pk=$1${idFilter}${delClause}`;
       mapper = (rows) => attachReturnItems('purchase_return_items', 'return_id', rows);
       break;
@@ -2663,7 +2675,7 @@ export async function pullCollection(
     case 'sales_returns':
       sql = `SELECT id AS _pk, local_id AS id, return_no, sale_id, bill_no, customer_id, customer_name,
                     return_date, refund_amount, discount, reason, item_count, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations, settle_mode
              FROM sales_returns WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       mapper = (rows) => attachReturnItems('sales_return_items', 'return_id', rows);
@@ -2671,7 +2683,7 @@ export async function pullCollection(
     case 'purchase_returns':
       sql = `SELECT id AS _pk, local_id AS id, return_no, purchase_id, purchase_no, supplier_id, supplier_name,
                     return_date, refund_amount, discount, reason, item_count, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations, settle_mode
              FROM purchase_returns WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       mapper = (rows) => attachReturnItems('purchase_return_items', 'return_id', rows);

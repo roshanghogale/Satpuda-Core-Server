@@ -98,10 +98,35 @@ export function MedicineSearch({ mode = 'sellable', onPick, autoFocus, placehold
   );
 }
 
+/**
+ * Returns settled in a bill (owner, 17 Oct 2026): a "Return SR1-7 17-10-2026" row, then the
+ * medicines that came back, their amounts shown as minus. `cols` = columns of the table.
+ */
+export function ReturnRows({ returns, cols }) {
+  return (returns || []).map((r) => [
+    <tr key={`r${r.return_id}`} className="ret-head">
+      <td colSpan={cols - 1}>Return {r.return_no} {fmtDate(r.return_date)}
+        {Number(r.refund) > r.amount + 0.009 ? ` (₹ ${money(r.amount)} of ₹ ${money(r.refund)} used in this bill)` : ''}</td>
+      <td className="r">− {money(r.amount)}</td>
+    </tr>,
+    ...(r.items || []).map((it, i) => (
+      <tr key={`r${r.return_id}-${i}`} className="ret-line">
+        <td />
+        <td colSpan={cols - 4}>{it.name}</td>
+        <td className="r">{it.qty}</td>
+        <td />
+        <td className="r">− {money(it.amount)}</td>
+      </tr>
+    )),
+  ]);
+}
+
 /** The printed bill. Shown on screen, printed with the browser's print (Ctrl+P). */
 export function BillPrint({ sale, profile }) {
   if (!sale) return null;
   const items = sale.items || [];
+  const rets = sale.returns_in_bill || [];
+  const retTotal = Math.round(rets.reduce((s, r) => s + Number(r.amount || 0), 0) * 100) / 100;
   return (
     <div className="bill-print">
       <div className="bp-head">
@@ -133,12 +158,15 @@ export function BillPrint({ sale, profile }) {
               <td className="r">{money(it.amount)}</td>
             </tr>
           ))}
+          <ReturnRows returns={rets} cols={7} />
         </tbody>
       </table>
       <div className="bp-tot">
         {Number(sale.discount) > 0 && <div>Discount: {money(sale.discount)}</div>}
         {Number(sale.rounding) !== 0 && <div>Round off: {money(sale.rounding)}</div>}
-        <div className="bp-total">Total: ₹ {money(sale.total_amount)}</div>
+        <div className={retTotal > 0 ? '' : 'bp-total'}>Total: ₹ {money(sale.total_amount)}</div>
+        {retTotal > 0 && <div>Return total: − ₹ {money(retTotal)}</div>}
+        {retTotal > 0 && <div className="bp-total">Net to pay: ₹ {money(Number(sale.total_amount) - retTotal)}</div>}
         <div>Paid: {money(sale.amount_paid)}{Number(sale.due_amount) > 0 ? ` · Due: ${money(sale.due_amount)}` : ''}</div>
         <div className="muted small">GST included in MRP</div>
       </div>

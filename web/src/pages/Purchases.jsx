@@ -21,6 +21,21 @@ function PurchaseForm({ editId }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState('');
   const [version, setVersion] = useState(null);
+  // Purchase returns to this supplier whose credit is not used yet; ticked ones are settled
+  // inside this purchase (owner, 17 Oct 2026).
+  const [openRets, setOpenRets] = useState([]);
+  const [useRets, setUseRets] = useState([]);
+  const [askRets, setAskRets] = useState(false);
+  useEffect(() => {
+    setOpenRets([]); setUseRets([]); setAskRets(false);
+    if (editId || !supplier.id) return;
+    let live = true;
+    api(`/suppliers/${supplier.id}/open-returns`).then((r) => {
+      if (!live || !r.length) return;
+      setOpenRets(r); setUseRets(r.map((x) => x.return_id)); setAskRets(true);
+    }).catch(() => {});
+    return () => { live = false; };
+  }, [supplier.id, editId]);
 
   useEffect(() => {
     if (!editId) return;
@@ -37,6 +52,9 @@ function PurchaseForm({ editId }) {
   const items = lines.filter((l) => l.name && (Number(l.qty) > 0 || Number(l.free_qty) > 0));
   const body = { supplier_id: supplier.id, supplier_name: supplier.name, bill_number: billNo, purchase_date: date, gst_calc_method: method,
     overall_discount: Number(od) || 0, cash_paid: Number(cash) || 0, online_paid: Number(online) || 0, items };
+  const pickedRets = openRets.filter((r) => useRets.includes(r.return_id));
+  const finalAmt = Number(calc?.final_amount ?? calc?.total_amount ?? 0);
+  const retTotal = Math.round(Math.min(pickedRets.reduce((x, r) => x + r.left, 0), finalAmt) * 100) / 100;
   const key = useDebounced(JSON.stringify(body), 300);
   useEffect(() => {
     if (!items.length) { setCalc(null); return; }
@@ -56,7 +74,7 @@ function PurchaseForm({ editId }) {
     try {
       const out = editId
         ? await api(`/purchases/${editId}`, { method: 'PUT', body: { ...body, version } })
-        : await api('/purchases', { method: 'POST', body });
+        : await api('/purchases', { method: 'POST', body: { ...body, apply_returns: useRets } });
       setDone(`Purchase ${out.purchase_no.split('/FY')[0]} saved: ₹ ${money(out.total_amount)}. Stock added.`);
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   }
@@ -103,6 +121,15 @@ function PurchaseForm({ editId }) {
           ))}</tbody>
         </table>
         <button className="btn small" onClick={() => setLines((ls) => [...ls, { ...EMPTY }])}>+ Add line</button>
+        {pickedRets.length > 0 && (
+          <table className="grid compact">
+            <tbody>{pickedRets.map((r) => [
+              <tr key={`r${r.return_id}`} className="ret-head"><td colSpan={3}>Return {r.return_no} {fmtDate(r.return_date)} <span className="muted small">(purchase {r.bill_no})</span></td>
+                <td className="r">− {money(r.left)}</td></tr>,
+              ...r.items.map((it, j) => <tr key={`r${r.return_id}-${j}`} className="ret-line"><td /><td>{it.name}</td><td className="r">{it.qty}</td><td className="r">− {money(it.amount)}</td></tr>),
+            ])}</tbody>
+          </table>)}
+        {openRets.length > 0 && !askRets && <button className="btn small" onClick={() => setAskRets(true)}>Returns to settle ({pickedRets.length}/{openRets.length})</button>}
         <p className="muted small">Qty and Free are in strips/packs as on the supplier's bill. Strip medicines add qty × pack tablets to stock.</p>
       </div>
       <div className="card totals">
@@ -112,11 +139,32 @@ function PurchaseForm({ editId }) {
           <label>Online paid<input value={online} onChange={(e) => setOnline(e.target.value)} /></label>
           <div className="sum">{calc ? <>
             <div>Taxable {money(calc.subtotal)} · GST {money(calc.total_gst)}{calc.rounding ? ` · round ${money(calc.rounding)}` : ''}</div>
-            <div className="big">₹ {money(calc.total_amount)}</div>
+            <div className={retTotal > 0 ? '' : 'big'}>{retTotal > 0 ? 'Total ' : ''}₹ {money(calc.total_amount)}</div>
+            {retTotal > 0 && <div>Return total − ₹ {money(retTotal)}</div>}
+            {retTotal > 0 && <div className="big">Net to pay ₹ {money(finalAmt - retTotal)}</div>}
             {calc.due > 0 && <div className="warn">Due to supplier after this bill: {money(calc.due)}</div>}
           </> : <span className="muted">Totals appear here</span>}</div>
         </div>
         {error && <div className="error">{error}</div>}
+        {askRets && (
+          <div className="modal-back" onClick={() => setAskRets(false)}>
+            <div className="modal narrow" onClick={(e) => e.stopPropagation()}>
+              <h3>Returns to {supplier.name} not settled yet</h3>
+              <p className="small">Tick the returns to settle in this purchase. Their credit comes off what you pay.</p>
+              <table className="grid compact"><tbody>{openRets.map((r) => (
+                <tr key={r.return_id}>
+                  <td><input type="checkbox" checked={useRets.includes(r.return_id)}
+                    onChange={(e) => setUseRets((u) => (e.target.checked ? [...u, r.return_id] : u.filter((x) => x !== r.return_id)))} /></td>
+                  <td>{r.return_no}<div className="muted small">{fmtDate(r.return_date)} · purchase {r.bill_no}</div>
+                    <div className="muted small">{r.items.map((it) => `${it.name} × ${it.qty}`).join(', ')}</div></td>
+                  <td className="r">₹ {money(r.left)}</td>
+                </tr>))}</tbody></table>
+              <div className="row end">
+                <button className="btn" onClick={() => { setUseRets([]); setAskRets(false); }}>Not in this purchase</button>
+                <button className="btn primary" autoFocus onClick={() => setAskRets(false)}>Use ticked</button>
+              </div>
+            </div>
+          </div>)}
         <div className="row end">
           {editId && <button className="btn" onClick={() => nav('/purchases')}>Cancel</button>}
           <button className="btn primary" disabled={busy || !calc} onClick={save}>{busy ? 'Saving…' : 'Save purchase'}</button>

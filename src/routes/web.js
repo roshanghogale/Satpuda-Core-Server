@@ -180,6 +180,13 @@ router.get('/purchases/:id/due', need('payments'), asyncHandler(async (req, res)
 router.get('/customers/:id/open-bills', needAny('parties', 'payments'), asyncHandler(async (req, res) => {
   ok(res, await store.openBills(req.web.storePk, 'customer', req.params.id));
 }));
+// Returns whose credit is not used yet, offered when billing that party.
+router.get('/customers/:id/open-returns', needAny('billing', 'parties'), asyncHandler(async (req, res) => {
+  ok(res, await store.openReturns(req.web.storePk, 'customer', req.params.id));
+}));
+router.get('/suppliers/:id/open-returns', needAny('purchase_entry', 'parties'), asyncHandler(async (req, res) => {
+  ok(res, await store.openReturns(req.web.storePk, 'supplier', req.params.id));
+}));
 router.get('/suppliers/:id/open-bills', needAny('parties', 'payments'), asyncHandler(async (req, res) => {
   ok(res, await store.openBills(req.web.storePk, 'supplier', req.params.id));
 }));

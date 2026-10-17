@@ -24,9 +24,9 @@ async function partyCredits(client, storePk, kind, partyId) {
     : `SELECT local_id, payment_date AS date, amount, allocations FROM supplier_payments
        WHERE store_pk=$1 AND supplier_id=$2 AND NOT deleted`;
   const ret = kind === 'customer'
-    ? `SELECT local_id, return_date AS date, refund_amount AS amount FROM sales_returns
+    ? `SELECT local_id, return_date AS date, refund_amount AS amount, allocations FROM sales_returns
        WHERE store_pk=$1 AND customer_id=$2 AND NOT deleted`
-    : `SELECT local_id, return_date AS date, refund_amount AS amount FROM purchase_returns
+    : `SELECT local_id, return_date AS date, refund_amount AS amount, allocations FROM purchase_returns
        WHERE store_pk=$1 AND supplier_id=$2 AND NOT deleted`;
   const [{ rows: pays }, { rows: rets }] = [
     await client.query(pay, [storePk, partyId]),
@@ -37,7 +37,10 @@ async function partyCredits(client, storePk, kind, partyId) {
       kind: 'payment', id: Number(p.local_id), date: p.date, amount: Number(p.amount) || 0,
       allocations: p.allocations || [],
     })),
-    ...rets.map((x) => ({ kind: 'return', id: Number(x.local_id), date: x.date, amount: Number(x.amount) || 0, allocations: [] })),
+    ...rets.map((x) => ({
+      kind: 'return', id: Number(x.local_id), date: x.date, amount: Number(x.amount) || 0,
+      allocations: x.allocations || [],
+    })),
   ];
 }
 

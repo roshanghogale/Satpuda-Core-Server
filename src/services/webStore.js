@@ -15,7 +15,7 @@ import * as admin from './adminService.js';
 import { applyServerSideSave } from './syncV2.js';
 import { allocateFySerialInTx, fetchDocsByLocalIds } from './syncService.js';
 import { billGstCte, expiryCutoffSql } from './adminFilters.js';
-import { buildSaleLine, saleCostPrice, salesCalc, purchaseCalc, purchaseStockUnits, money, pyRound } from './billRules.js';
+import { buildSaleLine, saleCostPrice, salesCalc, purchaseCalc, purchaseStockUnits, money, pyRound, paymentResult } from './billRules.js';
 import { isStripCountType, parseTabletsPerStripe } from '../utils/saleProfit.js';
 import { audit } from './webUsers.js';
 import { partyBillClearing } from './partyDueCascade.js';
@@ -199,7 +199,8 @@ export async function saleDetail(storePk, id) {
     `SELECT username, action, created_at FROM web_audit WHERE store_pk=$1 AND collection='sales' AND local_id=$2
       ORDER BY created_at`, [storePk, Number(id)],
   );
-  return { ...sale, made_by: by.get(Number(id)) || null, web_history: hist.rows };
+  const returnsIn = await returnsInBill(storePk, 'customer', Number(id));
+  return { ...sale, made_by: by.get(Number(id)) || null, web_history: hist.rows, returns_in_bill: returnsIn };
 }
 
 export async function purchasesList(storePk, opts) {
@@ -210,7 +211,8 @@ export async function purchasesList(storePk, opts) {
 }
 
 export async function purchaseDetail(storePk, id) {
-  return admin.getPurchaseDetail(storePk, Number(id));
+  const p = await admin.getPurchaseDetail(storePk, Number(id));
+  return { ...p, returns_in_bill: await returnsInBill(storePk, 'supplier', Number(id)) };
 }
 
 export async function customerPayments(storePk, opts) {
@@ -251,6 +253,93 @@ async function withCleared(storePk, kind, rows) {
     const used = r2(cleared.reduce((s, c) => s + c.amount, 0));
     return { ...r, cleared, left_as_credit: Math.max(0, r2(Number(r.amount) - used)) };
   });
+}
+
+/**
+ * A party's returns whose credit is not used yet (owner, 17 Oct 2026: "when billing a party
+ * with return credit, ask which returns to settle in this bill"). `left` is what the clearing
+ * rule has not spent on any bill, less any cash/online handed back for that return.
+ */
+export async function openReturns(storePk, kind, partyId) {
+  const pid = Number(partyId);
+  if (!(pid > 0)) return [];
+  const res = await partyBillClearing({ query }, storePk, kind, pid);
+  const used = new Map();
+  for (const a of res.applied) {
+    if (a.credit_kind === 'return') used.set(Number(a.credit_id), r2((used.get(Number(a.credit_id)) || 0) + a.amount));
+  }
+  const open = res.credits
+    .filter((c) => c.kind === 'return' && c.amount > 0.009)
+    .map((c) => ({ id: c.id, left: r2(c.amount - (used.get(c.id) || 0)) }))
+    .filter((o) => o.left > 0.009);
+  if (!open.length) return [];
+  const t = kind === 'customer' ? 'sales_returns' : 'purchase_returns';
+  const docs = await fetchDocsByLocalIds(storePk, t, open.map((o) => o.id));
+  // Money handed back for a return is a negative receipt with the return number as reference.
+  const paidOut = new Map();
+  if (kind === 'customer') {
+    const { rows } = await query(
+      `SELECT reference_no, SUM(-amount)::float AS paid FROM customer_payments
+        WHERE store_pk=$1 AND customer_id=$2 AND NOT deleted AND amount < 0 GROUP BY reference_no`,
+      [storePk, pid],
+    );
+    for (const x of rows) paidOut.set(String(x.reference_no || ''), Number(x.paid) || 0);
+  }
+  return open.map((o) => {
+    const d = docs.find((x) => Number(x.id) === o.id);
+    if (!d || d.deleted || ['cash', 'online'].includes(String(d.settle_mode || ''))) return null;
+    const left = r2(Math.min(o.left, Number(d.refund_amount) - (paidOut.get(String(d.return_no)) || 0)));
+    if (left <= 0.009) return null;
+    return {
+      return_id: o.id, return_no: d.return_no, return_date: String(d.return_date).slice(0, 10),
+      bill_no: showNo(kind, kind === 'customer' ? d.bill_no : d.purchase_no), amount: r2(d.refund_amount), left,
+      items: (d.items || []).map((it) => ({ name: it.name, qty: Number(it.qty), amount: r2(it.amount) })),
+    };
+  }).filter(Boolean)
+    .sort((a, b) => (a.return_date < b.return_date ? -1 : a.return_date > b.return_date ? 1 : a.return_id - b.return_id));
+}
+
+/**
+ * The returns a new bill settles: each gives what it has left, never more than the bill
+ * leaves unpaid. Gives the return documents with this bill added to their allocations.
+ */
+async function returnsForBill(storePk, kind, partyId, wanted, billId, billNo, unpaid) {
+  const ids = [...new Set((Array.isArray(wanted) ? wanted : []).map((x) => Number(x?.return_id ?? x)).filter((v) => v > 0))];
+  if (!ids.length) return { list: [], total: 0 };
+  const open = new Map((await openReturns(storePk, kind, partyId)).map((r) => [r.return_id, r]));
+  const docs = await fetchDocsByLocalIds(storePk, kind === 'customer' ? 'sales_returns' : 'purchase_returns', ids);
+  let room = r2(unpaid);
+  const list = [];
+  for (const id of ids) {
+    const o = open.get(id);
+    if (!o) throw new AppError(400, 'That return has no credit left. Open the bill again.');
+    if (room <= 0.009) break;
+    const amount = r2(Math.min(o.left, room));
+    room = r2(room - amount);
+    const doc = { ...docs.find((d) => Number(d.id) === id) };
+    delete doc._pk;
+    doc.allocations = [...cleanAllocations(doc.allocations), { bill_id: Number(billId), bill_no: showNo(kind, billNo), amount }];
+    list.push({ doc, amount, base_version: Number(doc.version || 0) });
+  }
+  return { list, total: r2(list.reduce((x, r) => x + r.amount, 0)) };
+}
+
+/** Returns settled inside a bill, with their medicines, for the bill and its print. */
+export async function returnsInBill(storePk, kind, billId) {
+  const t = kind === 'customer' ? 'sales_returns' : 'purchase_returns';
+  const { rows } = await query(
+    `SELECT local_id FROM ${t} WHERE store_pk=$1 AND NOT deleted
+        AND allocations @> jsonb_build_array(jsonb_build_object('bill_id', $2::bigint))`,
+    [storePk, Number(billId)],
+  );
+  if (!rows.length) return [];
+  const docs = await fetchDocsByLocalIds(storePk, t, rows.map((r) => Number(r.local_id)));
+  return docs.filter((d) => !d.deleted).map((d) => ({
+    return_id: Number(d.id), return_no: d.return_no, return_date: String(d.return_date).slice(0, 10),
+    refund: r2(d.refund_amount),
+    amount: r2(cleanAllocations(d.allocations).filter((a) => a.bill_id === Number(billId)).reduce((x, a) => x + a.amount, 0)),
+    items: (d.items || []).map((it) => ({ name: it.name, batch_no: it.batch_no, qty: Number(it.qty), rate: Number(it.rate), amount: r2(it.amount) })),
+  })).sort((a, b) => (a.return_date < b.return_date ? -1 : a.return_date > b.return_date ? 1 : a.return_id - b.return_id));
 }
 
 /** A party's bills that still owe, oldest first, for "Choose bills" in the pay box. */
@@ -570,7 +659,13 @@ export async function createSale(storePk, user, body) {
     const num = await allocateFySerialInTx(client, storePk, 'sales', billDate);
     const id = await nextId('sales');
     const cu = `web-${randomUUID()}`;
-    const p = calc.payment;
+    // Returns settled in this bill: their credit pays it, shown as Return rows on the bill.
+    const rets = cust.walk_in ? { list: [], total: 0 } : await returnsForBill(storePk, 'customer', cust.local_id,
+      body.apply_returns, id, num.bill_no, r2(calc.summary.total_amount - calc.payment.amount_paid));
+    const p = rets.total > 0
+      ? paymentResult(r2(calc.summary.total_amount - rets.total), calc.cash_paid, calc.online_paid,
+        prevDue, r2(Math.max(0, prevCredit - rets.total)))
+      : calc.payment;
     const doc = {
       id, local_id: id, client_uuid: cu, bill_no: num.bill_no, fy_start_year: num.fy_start_year, fy_serial: num.fy_serial,
       customer_id: Number(cust.local_id), customer_name: cust.name, customer_phone: cust.phone || '',
@@ -586,7 +681,11 @@ export async function createSale(storePk, user, body) {
       ref_collection: 'sales', ref_id: id,
     }));
     events.push({ op: 'upsert', collection: 'sales', doc, stock_ops, base_version: 0 });
-    made = { id, bill_no: num.bill_no, display_bill_no: num.display_bill_no, total_amount: doc.total_amount };
+    for (const r of rets.list) {
+      events.push({ op: 'upsert', collection: 'sales_returns', doc: r.doc, stock_ops: [], base_version: r.base_version });
+    }
+    made = { id, bill_no: num.bill_no, display_bill_no: num.display_bill_no, total_amount: doc.total_amount,
+      returns_applied: rets.total };
     return events;
   }, () => ({ action: 'sale.create', collection: 'sales', localId: made.id, refNo: made.bill_no,
     detail: { total: made.total_amount } }));
@@ -729,7 +828,7 @@ export async function createSalesReturn(storePk, user, body) {
       doc: { id, local_id: id, return_no: returnNo, sale_id: Number(sale.local_id ?? sale.id), bill_no: sale.bill_no,
         customer_id: sale.customer_id, customer_name: sale.customer_name, return_date: todayIst(),
         refund_amount: refund, discount: discPct, reason: cleanText(body.reason, 200), item_count: items.length, items,
-        created_at: new Date().toISOString() },
+        settle_mode: settle, allocations: [], created_at: new Date().toISOString() },
       stock_ops: [...qty].map(([mid, q]) => ({ op_uuid: `sales_returns:${cu}:med:${mid}:v1`, op: 'sale_return',
         qty_delta: Math.round(q), medicine_id: mid, ref_collection: 'sales_returns', ref_id: id })),
     }];
@@ -895,7 +994,14 @@ export async function createPurchase(storePk, user, body) {
       ref_collection: 'purchases', ref_id: id,
     }));
     events.push({ op: 'upsert', collection: 'purchases', doc, stock_ops, base_version: 0 });
-    made = { id, purchase_no: num.purchase_no, display_purchase_no: num.display_purchase_no, total_amount: doc.total_amount };
+    // Purchase returns settled inside this purchase (owner, 17 Oct 2026): their credit pays it.
+    const rets = await returnsForBill(storePk, 'supplier', sup.local_id, body.apply_returns, id, num.purchase_no,
+      r2(Number(doc.final_amount ?? doc.total_amount ?? 0) - Number(doc.amount_paid || 0)));
+    for (const r of rets.list) {
+      events.push({ op: 'upsert', collection: 'purchase_returns', doc: r.doc, stock_ops: [], base_version: r.base_version });
+    }
+    made = { id, purchase_no: num.purchase_no, display_purchase_no: num.display_purchase_no, total_amount: doc.total_amount,
+      returns_applied: rets.total };
     return events;
   }, () => ({ action: 'purchase.create', collection: 'purchases', localId: made.id, refNo: made.purchase_no,
     detail: { total: made.total_amount } }));

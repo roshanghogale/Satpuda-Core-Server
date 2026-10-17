@@ -143,3 +143,7 @@ input.num { width: 72px; text-align: right; padding: 4px 6px; }
   .totals .sum { text-align: left; }
   .bp-meta { grid-template-columns: 1fr; }
 }
+
+/* Returns settled in a bill: a Return row, then its medicines. */
+.ret-head td { font-style: italic; border-top: 1px dashed var(--line); }
+.ret-line td { opacity: .8; font-size: 12px; }
