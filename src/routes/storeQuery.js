@@ -118,6 +118,26 @@ router.get('/purchases', asyncHandler(async (req, res) => {
   ok(res, base);
 }));
 
+/** The last purchase of one medicine (by name) from each supplier -- the PC's purchase entry
+ *  warns when another (or the same) supplier gave it cheaper (owner, 17 Oct 2026). */
+router.get('/purchase-rates', asyncHandler(async (req, res) => {
+  const name = String(req.query.name || '').trim();
+  if (!name) return ok(res, { rows: [] });
+  const { rows } = await query(
+    `SELECT DISTINCT ON (upper(btrim(COALESCE(p.supplier_name, ''))))
+            p.supplier_id, p.supplier_name, pi.rate, pi.mrp, pi.type, pi.tablets_per_stripe,
+            COALESCE(p.bill_number, '') AS bill_number, p.purchase_date
+       FROM purchase_items pi
+       JOIN purchases p ON p.id = pi.purchase_id
+      WHERE pi.store_pk = $1 AND p.store_pk = $1 AND NOT p.deleted
+        AND upper(btrim(pi.name)) = upper(btrim($2)) AND pi.rate > 0
+      ORDER BY upper(btrim(COALESCE(p.supplier_name, ''))), p.purchase_date DESC, p.local_id DESC, pi.id DESC
+      LIMIT 50`,
+    [await storePk(req), name],
+  );
+  ok(res, { rows });
+}));
+
 router.get('/purchases/:localId', asyncHandler(async (req, res) => {
   ok(res, await admin.getPurchaseDetail(await storePk(req), Number(req.params.localId)));
 }));
