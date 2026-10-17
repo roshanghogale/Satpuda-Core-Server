@@ -875,3 +875,8 @@ CREATE TABLE IF NOT EXISTS demo_users (
   last_login_at TIMESTAMPTZ,
   login_count   INTEGER NOT NULL DEFAULT 0
 );
+
+-- Which bills a payment was given to (owner, 17 Oct 2026): [{bill_id, bill_no, amount}].
+-- bill_id is the sale's / purchase's local_id. NULL = clears oldest first, as before.
+ALTER TABLE customer_payments ADD COLUMN IF NOT EXISTS allocations JSONB;
+ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS allocations JSONB;

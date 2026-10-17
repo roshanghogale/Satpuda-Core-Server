@@ -4,9 +4,7 @@
  * even when clients only push party totals.
  */
 
-function r2(v) {
-  return Math.round((Number(v) || 0) * 100) / 100;
-}
+import { clearBills, r2 } from './billClearing.js';
 
 /** Cash/online at entry wins over a stored 0 in amount_paid_at_entry. */
 export const PURCHASE_ENTRY_PAID_SQL = `
@@ -18,41 +16,62 @@ export const PURCHASE_ENTRY_PAID_SQL = `
   )
 `;
 
-function cascadeSalesFifo(billsOldestFirst, standalonePayments, returnRefunds) {
-  let pool = r2(standalonePayments + returnRefunds);
-  for (const b of billsOldestFirst) {
-    pool = r2(pool + Math.max(0, r2(b.amount_paid - b.total_amount)));
-  }
-  return billsOldestFirst.map((b) => {
-    const unpaid = Math.max(0, r2(b.total_amount - b.amount_paid));
-    if (unpaid <= 0.01) {
-      return { id: b.id, local_id: b.local_id, remainingDue: 0, accountCleared: true };
-    }
-    if (pool + 0.01 >= unpaid) {
-      pool = r2(pool - unpaid);
-      return { id: b.id, local_id: b.local_id, remainingDue: 0, accountCleared: true };
-    }
-    const rem = r2(unpaid - pool);
-    pool = 0;
-    return { id: b.id, local_id: b.local_id, remainingDue: rem, accountCleared: rem <= 0.01 };
-  });
+/** Payments (with the bills they were given) and returns of one party, as credits. */
+async function partyCredits(client, storePk, kind, partyId) {
+  const pay = kind === 'customer'
+    ? `SELECT local_id, payment_date AS date, amount, allocations FROM customer_payments
+       WHERE store_pk=$1 AND customer_id=$2 AND NOT deleted`
+    : `SELECT local_id, payment_date AS date, amount, allocations FROM supplier_payments
+       WHERE store_pk=$1 AND supplier_id=$2 AND NOT deleted`;
+  const ret = kind === 'customer'
+    ? `SELECT local_id, return_date AS date, refund_amount AS amount FROM sales_returns
+       WHERE store_pk=$1 AND customer_id=$2 AND NOT deleted`
+    : `SELECT local_id, return_date AS date, refund_amount AS amount FROM purchase_returns
+       WHERE store_pk=$1 AND supplier_id=$2 AND NOT deleted`;
+  const [{ rows: pays }, { rows: rets }] = [
+    await client.query(pay, [storePk, partyId]),
+    await client.query(ret, [storePk, partyId]),
+  ];
+  return [
+    ...pays.map((p) => ({
+      kind: 'payment', id: Number(p.local_id), date: p.date, amount: Number(p.amount) || 0,
+      allocations: p.allocations || [],
+    })),
+    ...rets.map((x) => ({ kind: 'return', id: Number(x.local_id), date: x.date, amount: Number(x.amount) || 0, allocations: [] })),
+  ];
 }
 
-function cascadePurchasesFifo(billsOldestFirst, standalonePayments, returnRefunds) {
-  let pool = r2(standalonePayments + returnRefunds);
-  return billsOldestFirst.map((b) => {
-    const unpaid = Math.max(0, r2(b.total_amount - b.amount_paid));
-    if (unpaid <= 0.01) {
-      return { id: b.id, local_id: b.local_id, remainingDue: 0, accountCleared: true };
-    }
-    if (pool + 0.01 >= unpaid) {
-      pool = r2(pool - unpaid);
-      return { id: b.id, local_id: b.local_id, remainingDue: 0, accountCleared: true };
-    }
-    const rem = r2(unpaid - pool);
-    pool = 0;
-    return { id: b.id, local_id: b.local_id, remainingDue: rem, accountCleared: rem <= 0.01 };
-  });
+function asBills(rows, dateCol) {
+  return rows.map((b) => ({
+    id: Number(b.local_id), date: b[dateCol], total: Number(b.total_amount), paid: Number(b.amount_paid),
+  }));
+}
+
+/**
+ * Bills, credits, each bill's remaining due and what each credit cleared (payment report).
+ * kind: 'customer' | 'supplier'.
+ */
+export async function partyBillClearing(client, storePk, kind, partyLocalId) {
+  const pid = Number(partyLocalId);
+  const bills = kind === 'customer'
+    ? (await client.query(
+      `SELECT local_id, bill_no, bill_date,
+              COALESCE(total_amount,0)::float AS total_amount, COALESCE(amount_paid,0)::float AS amount_paid
+       FROM sales WHERE store_pk=$1 AND customer_id=$2 AND NOT deleted AND NOT is_autosave`,
+      [storePk, pid],
+    )).rows
+    : (await client.query(
+      `SELECT local_id, purchase_no AS bill_no, bill_number, purchase_date AS bill_date,
+              COALESCE(final_amount, total_amount, 0)::float AS total_amount,
+              (${PURCHASE_ENTRY_PAID_SQL})::float AS amount_paid
+       FROM purchases WHERE store_pk=$1 AND supplier_id=$2 AND NOT deleted
+         AND NOT COALESCE(is_autosave, false)`,
+      [storePk, pid],
+    )).rows;
+  const credits = await partyCredits(client, storePk, kind, pid);
+  const res = clearBills(asBills(bills, 'bill_date'), credits, { overpayJoins: kind === 'customer' });
+  // rows: the bills as read; remaining: the rule's answer per bill; applied: who paid what.
+  return { rows: bills, credits, remaining: res.bills, applied: res.applied };
 }
 
 /**
@@ -100,7 +119,7 @@ export async function cascadeCustomerAfterLedgerChange(
   );
 
   const { rows: sales } = await client.query(
-    `SELECT id, local_id,
+    `SELECT id, local_id, bill_date,
             COALESCE(total_amount,0)::float AS total_amount,
             COALESCE(amount_paid,0)::float AS amount_paid,
             COALESCE(total_due,0)::float AS total_due,
@@ -112,8 +131,10 @@ export async function cascadeCustomerAfterLedgerChange(
     [storePk, cid],
   );
 
-  const fifo = cascadeSalesFifo(sales, paySum, retSum);
-  const byId = new Map(sales.map((s) => [Number(s.id), s]));
+  // Payments pay the bills they were given first, the rest clears oldest first.
+  const credits = await partyCredits(client, storePk, 'customer', cid);
+  const fifo = clearBills(asBills(sales, 'bill_date'), credits, { overpayJoins: true }).bills;
+  const byId = new Map(sales.map((s) => [Number(s.local_id), s]));
   const dirtyIds = [];
   const dirtyRem = [];
   const dirtyCleared = [];
@@ -125,8 +146,8 @@ export async function cascadeCustomerAfterLedgerChange(
   for (const f of fifo) {
     const row = byId.get(Number(f.id));
     if (!row) continue;
-    const cleared = !!f.accountCleared;
-    const rem = r2(f.remainingDue);
+    const cleared = !!f.cleared;
+    const rem = r2(f.remaining);
     const billCleared = rem <= 0.01;
     // due_amount is written with total_due below, so it is compared too: a bill whose
     // total_due was right but whose due_amount was stale never counted as dirty and
@@ -202,7 +223,7 @@ export async function cascadeSupplierAfterLedgerChange(
   );
 
   const { rows: purchases } = await client.query(
-    `SELECT id, local_id,
+    `SELECT id, local_id, purchase_date,
             COALESCE(final_amount, total_amount, 0)::float AS total_amount,
             (${PURCHASE_ENTRY_PAID_SQL})::float AS amount_paid,
             COALESCE(due_amount, 0)::float AS due_amount,
@@ -216,8 +237,9 @@ export async function cascadeSupplierAfterLedgerChange(
     [storePk, sid],
   );
 
-  const fifo = cascadePurchasesFifo(purchases, paySum, retSum);
-  const byId = new Map(purchases.map((s) => [Number(s.id), s]));
+  const credits = await partyCredits(client, storePk, 'supplier', sid);
+  const fifo = clearBills(asBills(purchases, 'purchase_date'), credits, { overpayJoins: false }).bills;
+  const byId = new Map(purchases.map((s) => [Number(s.local_id), s]));
   const dirtyIds = [];
   const dirtyRem = [];
   const dirtyCleared = [];
@@ -226,8 +248,8 @@ export async function cascadeSupplierAfterLedgerChange(
   for (const f of fifo) {
     const row = byId.get(Number(f.id));
     if (!row) continue;
-    const cleared = !!f.accountCleared;
-    const rem = r2(f.remainingDue);
+    const cleared = !!f.cleared;
+    const rem = r2(f.remaining);
     if (
       Math.abs(Number(row.due_amount) - rem) > 0.009 ||
       Math.abs(Number(row.due) - rem) > 0.009 ||

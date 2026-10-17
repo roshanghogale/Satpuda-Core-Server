@@ -153,8 +153,8 @@ export function printNow() {
 /**
  * Take a payment for one bill from Sales / Purchase History (owner, 12 Oct 2026). Saved as an
  * ordinary customer / supplier payment with the bill number as its reference, so the ledger,
- * the party's due and every bill's status follow. Payments clear the oldest bill first: the
- * box shows the older dues and fills in the amount that clears this bill.
+ * the party's due and every bill's status follow. The payment is given to THIS bill
+ * (allocations, 17 Oct 2026); whatever is paid over its due clears the oldest bills.
  */
 export function PayDue({ kind, billId, onDone, onCancel }) {
   const [info, setInfo] = useState(null);
@@ -174,9 +174,12 @@ export function PayDue({ kind, billId, onDone, onCancel }) {
     setError(''); setBusy(true);
     try {
       const sale = kind === 'sale';
+      const amt = Number(amount);
+      const allocations = info.bill_due > 0.009
+        ? [{ bill_id: info.bill_id, bill_no: shortNo(info.bill_no), amount: Math.min(amt, info.bill_due) }] : [];
       const body = sale
-        ? { customer_id: info.party_id, amount: Number(amount), mode, reference: shortNo(info.bill_no), note: `Paid from Sales History (${shortNo(info.bill_no)})` }
-        : { supplier_id: info.party_id, amount: Number(amount), mode, reference: shortNo(info.bill_no) };
+        ? { customer_id: info.party_id, amount: amt, mode, reference: shortNo(info.bill_no), note: `Paid from Sales History (${shortNo(info.bill_no)})`, allocations }
+        : { supplier_id: info.party_id, amount: amt, mode, reference: shortNo(info.bill_no), allocations };
       await api(sale ? '/payments/customers' : '/payments/suppliers', { method: 'POST', body });
       onDone(sale
         ? `₹ ${money(amount)} received from ${info.party} against ${shortNo(info.bill_no)}.`
@@ -193,8 +196,8 @@ export function PayDue({ kind, billId, onDone, onCancel }) {
           <tr><td>{kind === 'sale' ? 'Customer' : 'Supplier'} total due</td><td className="r">₹ {money(info.party_due)}</td></tr>
         </tbody>
       </table>
-      {info.older_due > 0.009 && info.bill_due > 0.009 && (
-        <p className="muted small">Payments clear the oldest bill first: ₹ {money(info.to_clear)} clears this bill.</p>
+      {info.bill_due > 0.009 && (
+        <p className="muted small">Clears this bill; any more clears the oldest bills.</p>
       )}
       <div className="row wrap">
         <label>Amount<input className="num" type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} /></label>

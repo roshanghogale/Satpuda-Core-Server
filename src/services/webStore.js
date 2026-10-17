@@ -18,6 +18,9 @@ import { billGstCte, expiryCutoffSql } from './adminFilters.js';
 import { buildSaleLine, saleCostPrice, salesCalc, purchaseCalc, purchaseStockUnits, money, pyRound } from './billRules.js';
 import { isStripCountType, parseTabletsPerStripe } from '../utils/saleProfit.js';
 import { audit } from './webUsers.js';
+import { partyBillClearing } from './partyDueCascade.js';
+import { cleanAllocations } from './billClearing.js';
+import { displayPurchaseNo, displaySalesBillNo } from '../utils/fy.js';
 
 const r2 = (x) => pyRound(x, 2);
 
@@ -211,11 +214,90 @@ export async function purchaseDetail(storePk, id) {
 }
 
 export async function customerPayments(storePk, opts) {
-  return admin.listCustomerPayments(storePk, opts || {});
+  const out = await admin.listCustomerPayments(storePk, opts || {});
+  if (String(opts?.with_cleared || '') === '1') out.rows = await withCleared(storePk, 'customer', out.rows);
+  return out;
 }
 
 export async function supplierPayments(storePk, opts) {
-  return admin.listSupplierPayments(storePk, opts || {});
+  const out = await admin.listSupplierPayments(storePk, opts || {});
+  if (String(opts?.with_cleared || '') === '1') out.rows = await withCleared(storePk, 'supplier', out.rows);
+  return out;
+}
+
+// ─── Which bills a payment cleared (owner, 17 Oct 2026) ──────────────────────
+
+const showNo = (kind, no) => (kind === 'customer' ? displaySalesBillNo(no) : displayPurchaseNo(no));
+
+/** Each payment row with `cleared`: [{bill_id, bill_no, bill_date, amount, how}] and `left_as_credit`. */
+async function withCleared(storePk, kind, rows) {
+  const pcol = kind === 'customer' ? 'customer_id' : 'supplier_id';
+  const parties = [...new Set(rows.map((r) => Number(r[pcol])).filter((v) => v > 0))];
+  const byParty = new Map();
+  for (const pid of parties) byParty.set(pid, await partyBillClearing({ query }, storePk, kind, pid));
+  return rows.map((r) => {
+    const res = byParty.get(Number(r[pcol]));
+    if (!res) return { ...r, cleared: [], left_as_credit: Math.max(0, r2(r.amount)) };
+    const billsById = new Map(res.rows.map((b) => [Number(b.local_id), b]));
+    const cleared = res.applied
+      .filter((a) => a.credit_kind === 'payment' && Number(a.credit_id) === Number(r.id))
+      .map((a) => {
+        const b = billsById.get(Number(a.bill_id)) || {};
+        return {
+          bill_id: Number(a.bill_id), bill_no: showNo(kind, b.bill_no), supplier_bill_no: b.bill_number || null,
+          bill_date: b.bill_date ? String(b.bill_date).slice(0, 10) : null, amount: a.amount, how: a.how,
+        };
+      });
+    const used = r2(cleared.reduce((s, c) => s + c.amount, 0));
+    return { ...r, cleared, left_as_credit: Math.max(0, r2(Number(r.amount) - used)) };
+  });
+}
+
+/** A party's bills that still owe, oldest first, for "Choose bills" in the pay box. */
+export async function openBills(storePk, kind, partyId) {
+  const res = await partyBillClearing({ query }, storePk, kind, Number(partyId));
+  const due = new Map(res.remaining.map((b) => [Number(b.id), r2(b.remaining)]));
+  return res.rows
+    .map((b) => ({
+      bill_id: Number(b.local_id), bill_no: showNo(kind, b.bill_no), supplier_bill_no: b.bill_number || null,
+      bill_date: String(b.bill_date).slice(0, 10), total: r2(b.total_amount), owes: due.get(Number(b.local_id)) || 0,
+    }))
+    .filter((b) => b.owes > 0.009)
+    .sort((a, b) => (a.bill_date < b.bill_date ? -1 : a.bill_date > b.bill_date ? 1 : a.bill_id - b.bill_id));
+}
+
+/**
+ * The bills a new payment is given, checked against what they owe now: only this party's
+ * bills, never more than a bill owes, all together never more than the payment.
+ */
+async function checkedAllocations(storePk, kind, partyId, raw, amount) {
+  const list = cleanAllocations(raw);
+  if (!list.length) return [];
+  const open = new Map((await openBills(storePk, kind, partyId)).map((b) => [b.bill_id, b]));
+  const out = [];
+  for (const a of list) {
+    const b = open.get(Number(a.bill_id));
+    if (!b) throw new AppError(400, `Bill ${a.bill_no || a.bill_id} owes nothing now. Open the pay box again.`);
+    if (a.amount > b.owes + 0.009) throw new AppError(400, `Bill ${b.bill_no} owes only ₹ ${b.owes.toFixed(2)}.`);
+    out.push({ bill_id: b.bill_id, bill_no: b.bill_no, amount: a.amount });
+  }
+  const sum = r2(out.reduce((s, a) => s + a.amount, 0));
+  if (sum > amount + 0.009) {
+    throw new AppError(400, `The bills you ticked need ₹ ${sum.toFixed(2)}; the amount is ₹ ${amount.toFixed(2)}.`);
+  }
+  return out;
+}
+
+/** Payment report: payments in the dates with the bills each one cleared, and totals. */
+export async function paymentReport(storePk, { kind, from, to, party_id } = {}) {
+  const k = kind === 'suppliers' || kind === 'supplier' ? 'supplier' : 'customer';
+  const opts = { from, to, limit: 5000, sort: 'date_asc' };
+  if (Number(party_id) > 0) opts[k === 'customer' ? 'customer_id' : 'supplier_id'] = Number(party_id);
+  const out = k === 'customer' ? await admin.listCustomerPayments(storePk, opts) : await admin.listSupplierPayments(storePk, opts);
+  const rows = await withCleared(storePk, k, out.rows);
+  const total = r2(rows.reduce((s, r) => s + Number(r.amount || 0), 0));
+  const cleared = r2(rows.reduce((s, r) => s + r.cleared.reduce((x, c) => x + c.amount, 0), 0));
+  return { kind: k, from: from || null, to: to || null, rows, totals: { amount: total, cleared, left_as_credit: r2(total - cleared), count: rows.length } };
 }
 
 /** Sales, purchases, GST by rate and the schedule register for a date range. */
@@ -882,9 +964,9 @@ function payAmounts(body) {
 
 /**
  * What is open on one bill, for the pay box in Sales / Purchase History (owner, 12 Oct 2026):
- * this bill's due, the party's older bills' dues and what clears this bill. Payments clear a
- * party's OLDEST bill first (partyDueCascade.js), so clearing a newer bill takes the older dues
- * too. total_due on each row is the cascaded remainder.
+ * this bill's due, the party's older bills' dues and the party's due. The payment is given to
+ * THIS bill (allocations, 17 Oct 2026), so to_clear is this bill's due; anything paid over it
+ * clears the oldest bills. total_due on each row is the cascaded remainder.
  */
 export async function billDueInfo(storePk, kind, id) {
   const sale = kind === 'sale';
@@ -926,12 +1008,13 @@ export async function billDueInfo(storePk, kind, id) {
     party_due: r2(party.due),
     bill_due: billDue,
     older_due: olderDue,
-    to_clear: billDue > 0.009 ? r2(billDue + olderDue) : 0,
+    to_clear: billDue > 0.009 ? billDue : 0,
   };
 }
 
 export async function customerPayment(storePk, user, body) {
   const { amount, mode } = payAmounts(body);
+  const allocations = await checkedAllocations(storePk, 'customer', body.customer_id, body.allocations, amount);
   let made;
   await save(storePk, user, async (client, device, { nextId }) => {
     const cust = await partyRow(client, 'customers', storePk, body.customer_id);
@@ -941,7 +1024,8 @@ export async function customerPayment(storePk, user, body) {
     return [{ op: 'upsert', collection: 'customer_payments', base_version: 0, doc: {
       id, local_id: id, customer_id: Number(cust.local_id), customer_name: cust.name, payment_date: todayIst(),
       amount, payment_mode: mode, cash_amount: mode === 'cash' ? amount : 0, online_amount: mode === 'online' ? amount : 0,
-      reference_no: cleanText(body.reference, 40) || null, note: cleanText(body.note, 200) || null, created_at: new Date().toISOString() } }];
+      reference_no: cleanText(body.reference, 40) || null, note: cleanText(body.note, 200) || null, allocations,
+      created_at: new Date().toISOString() } }];
   }, () => ({ action: 'customer_payment.create', collection: 'customer_payments', localId: made.id,
     detail: { customer: made.customer, amount: made.amount, mode } }));
   return made;
@@ -949,6 +1033,7 @@ export async function customerPayment(storePk, user, body) {
 
 export async function supplierPayment(storePk, user, body) {
   const { amount, mode } = payAmounts(body);
+  const allocations = await checkedAllocations(storePk, 'supplier', body.supplier_id, body.allocations, amount);
   let made;
   await save(storePk, user, async (client, device, { nextId }) => {
     const sup = await partyRow(client, 'suppliers', storePk, body.supplier_id);
@@ -966,7 +1051,7 @@ export async function supplierPayment(storePk, user, body) {
       id, local_id: id, payment_no: payNo, supplier_id: Number(sup.local_id), supplier_name: sup.name,
       payment_date: todayIst(), amount, mode: mode === 'online' ? 'Online' : 'Cash',
       reference: cleanText(body.reference, 60) || null, due_before: before, due_after: r2(Math.max(0, before - amount)),
-      created_at: new Date().toISOString() } }];
+      allocations, created_at: new Date().toISOString() } }];
   }, () => ({ action: 'supplier_payment.create', collection: 'supplier_payments', localId: made.id, refNo: made.payment_no,
     detail: { supplier: made.supplier, amount: made.amount, mode } }));
   return made;

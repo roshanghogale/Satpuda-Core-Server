@@ -176,6 +176,16 @@ router.get('/sales/:id/due', need('payments'), asyncHandler(async (req, res) => 
 router.get('/purchases/:id/due', need('payments'), asyncHandler(async (req, res) => {
   ok(res, await store.billDueInfo(req.web.storePk, 'purchase', req.params.id));
 }));
+// Which bills still owe, for "Choose bills" in the pay box; and the payment report.
+router.get('/customers/:id/open-bills', needAny('parties', 'payments'), asyncHandler(async (req, res) => {
+  ok(res, await store.openBills(req.web.storePk, 'customer', req.params.id));
+}));
+router.get('/suppliers/:id/open-bills', needAny('parties', 'payments'), asyncHandler(async (req, res) => {
+  ok(res, await store.openBills(req.web.storePk, 'supplier', req.params.id));
+}));
+router.get('/payments/report', need('parties'), asyncHandler(async (req, res) => {
+  ok(res, await store.paymentReport(req.web.storePk, req.query));
+}));
 router.post('/payments/customers', need('payments'), asyncHandler(async (req, res) => {
   ok(res, await store.customerPayment(...W(req), req.body || {}));
 }));

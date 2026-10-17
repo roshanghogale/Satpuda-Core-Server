@@ -1,0 +1,846 @@
+[
+  {
+    "name": "no allocations: oldest first, as before",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-12",
+        "amount": 250,
+        "allocations": []
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 2,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 3,
+          "remaining": 300,
+          "cleared": false
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 1,
+          "amount": 100,
+          "how": "oldest"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 2,
+          "amount": 150,
+          "how": "oldest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "payment chosen for the newest bill",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-12",
+        "amount": 250,
+        "allocations": [
+          {
+            "bill_id": 3,
+            "bill_no": "S3",
+            "amount": 250
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 100,
+          "cleared": false
+        },
+        {
+          "id": 2,
+          "remaining": 150,
+          "cleared": false
+        },
+        {
+          "id": 3,
+          "remaining": 50,
+          "cleared": false
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 3,
+          "amount": 250,
+          "how": "chosen"
+        }
+      ]
+    }
+  },
+  {
+    "name": "chosen bill owes less: the rest goes oldest first",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-12",
+        "amount": 500,
+        "allocations": [
+          {
+            "bill_id": 1,
+            "bill_no": "S1",
+            "amount": 400
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 2,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 3,
+          "remaining": 50,
+          "cleared": false
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 1,
+          "amount": 100,
+          "how": "chosen"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 2,
+          "amount": 150,
+          "how": "oldest"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 3,
+          "amount": 250,
+          "how": "oldest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "chosen bill is gone: all oldest first",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-12",
+        "amount": 120,
+        "allocations": [
+          {
+            "bill_id": 99,
+            "bill_no": "S99",
+            "amount": 120
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 2,
+          "remaining": 130,
+          "cleared": false
+        },
+        {
+          "id": 3,
+          "remaining": 300,
+          "cleared": false
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 1,
+          "amount": 100,
+          "how": "oldest"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 2,
+          "amount": 20,
+          "how": "oldest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "two bills chosen, payment runs out on the second",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-12",
+        "amount": 350,
+        "allocations": [
+          {
+            "bill_id": 3,
+            "amount": 300
+          },
+          {
+            "bill_id": 2,
+            "amount": 150
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 100,
+          "cleared": false
+        },
+        {
+          "id": 2,
+          "remaining": 100,
+          "cleared": false
+        },
+        {
+          "id": 3,
+          "remaining": 0,
+          "cleared": true
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 3,
+          "amount": 300,
+          "how": "chosen"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 2,
+          "amount": 50,
+          "how": "chosen"
+        }
+      ]
+    }
+  },
+  {
+    "name": "two payments choose the same bill",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-11",
+        "amount": 200,
+        "allocations": [
+          {
+            "bill_id": 3,
+            "amount": 200
+          }
+        ]
+      },
+      {
+        "kind": "payment",
+        "id": 12,
+        "date": "2026-01-12",
+        "amount": 200,
+        "allocations": [
+          {
+            "bill_id": 3,
+            "amount": 200
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 2,
+          "remaining": 150,
+          "cleared": false
+        },
+        {
+          "id": 3,
+          "remaining": 0,
+          "cleared": true
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 3,
+          "amount": 200,
+          "how": "chosen"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 12,
+          "bill_id": 3,
+          "amount": 100,
+          "how": "chosen"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 12,
+          "bill_id": 1,
+          "amount": 100,
+          "how": "oldest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "older unchosen payment still clears oldest",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-02",
+        "amount": 100,
+        "allocations": []
+      },
+      {
+        "kind": "payment",
+        "id": 12,
+        "date": "2026-01-03",
+        "amount": 300,
+        "allocations": [
+          {
+            "bill_id": 3,
+            "amount": 300
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 2,
+          "remaining": 150,
+          "cleared": false
+        },
+        {
+          "id": 3,
+          "remaining": 0,
+          "cleared": true
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 12,
+          "bill_id": 3,
+          "amount": 300,
+          "how": "chosen"
+        },
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 1,
+          "amount": 100,
+          "how": "oldest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "sales: counter overpayment pays older bills",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 260
+      }
+    ],
+    "credits": [],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 40,
+          "cleared": false
+        },
+        {
+          "id": 2,
+          "remaining": 0,
+          "cleared": true
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "overpaid_bill",
+          "credit_id": 2,
+          "bill_id": 1,
+          "amount": 60,
+          "how": "oldest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "purchases: entry overpayment does not",
+    "overpay_joins": false,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 260
+      }
+    ],
+    "credits": [],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 100,
+          "cleared": false
+        },
+        {
+          "id": 2,
+          "remaining": 0,
+          "cleared": true
+        }
+      ],
+      "applied": []
+    }
+  },
+  {
+    "name": "return credit with a cash refund taken out of it",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "return",
+        "id": 21,
+        "date": "2026-01-06",
+        "amount": 100,
+        "allocations": []
+      },
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-06",
+        "amount": -60,
+        "allocations": []
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 60,
+          "cleared": false
+        },
+        {
+          "id": 2,
+          "remaining": 150,
+          "cleared": false
+        },
+        {
+          "id": 3,
+          "remaining": 300,
+          "cleared": false
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "return",
+          "credit_id": 21,
+          "bill_id": 1,
+          "amount": 40,
+          "how": "oldest"
+        }
+      ]
+    }
+  },
+  {
+    "name": "allocation amounts as text and junk entries",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 2,
+        "date": "2026-01-05",
+        "total": 200,
+        "paid": 50
+      },
+      {
+        "id": 3,
+        "date": "2026-01-10",
+        "total": 300,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-12",
+        "amount": 50,
+        "allocations": [
+          {
+            "bill_id": "2",
+            "amount": "50"
+          },
+          {
+            "bill_id": 0,
+            "amount": 10
+          },
+          null,
+          {
+            "bill_id": 3,
+            "amount": -5
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 100,
+          "cleared": false
+        },
+        {
+          "id": 2,
+          "remaining": 100,
+          "cleared": false
+        },
+        {
+          "id": 3,
+          "remaining": 300,
+          "cleared": false
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 2,
+          "amount": 50,
+          "how": "chosen"
+        }
+      ]
+    }
+  },
+  {
+    "name": "nothing owed, payment is all credit",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 1,
+        "date": "2026-01-01",
+        "total": 100,
+        "paid": 100
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-01-02",
+        "amount": 80,
+        "allocations": [
+          {
+            "bill_id": 1,
+            "amount": 80
+          }
+        ]
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 1,
+          "remaining": 0,
+          "cleared": true
+        }
+      ],
+      "applied": []
+    }
+  },
+  {
+    "name": "same date: lower id is older",
+    "overpay_joins": true,
+    "bills": [
+      {
+        "id": 5,
+        "date": "2026-02-01",
+        "total": 100,
+        "paid": 0
+      },
+      {
+        "id": 4,
+        "date": "2026-02-01",
+        "total": 100,
+        "paid": 0
+      }
+    ],
+    "credits": [
+      {
+        "kind": "payment",
+        "id": 11,
+        "date": "2026-02-01",
+        "amount": 100,
+        "allocations": []
+      }
+    ],
+    "expect": {
+      "bills": [
+        {
+          "id": 4,
+          "remaining": 0,
+          "cleared": true
+        },
+        {
+          "id": 5,
+          "remaining": 100,
+          "cleared": false
+        }
+      ],
+      "applied": [
+        {
+          "credit_kind": "payment",
+          "credit_id": 11,
+          "bill_id": 4,
+          "amount": 100,
+          "how": "oldest"
+        }
+      ]
+    }
+  }
+]

@@ -31,6 +31,7 @@ import {
   recordAcceptedChanges,
   newSyncHint,
 } from './syncRevision.js';
+import { cleanAllocations } from './billClearing.js';
 import { broadcastSyncHint } from '../ws/syncHub.js';
 import { PROPAGATED_FIELDS, changedFields, propagateMedicineLines, propagationNote } from './medicineLines.js';
 import {
@@ -1283,6 +1284,17 @@ async function realPaymentLocalId(client, storePk, table, localId) {
   return next;
 }
 
+/**
+ * [$allocations, $has] for a payment upsert. A device that does not know about
+ * allocations (older app) sends no `allocations` key: the stored ones are kept, so an
+ * old app editing the amount does not undo the bills chosen on a newer one.
+ */
+function allocationParams(doc) {
+  if (!Object.prototype.hasOwnProperty.call(doc, 'allocations')) return [null, false];
+  const list = cleanAllocations(doc.allocations);
+  return [list.length ? JSON.stringify(list) : null, true];
+}
+
 async function upsertCustomerPayment(client, storePk, doc, hint = null) {
   const localId = await realPaymentLocalId(client, storePk, 'customer_payments', localIdOf(doc));
   const meta = syncMeta(doc);
@@ -1295,9 +1307,10 @@ async function upsertCustomerPayment(client, storePk, doc, hint = null) {
     `INSERT INTO customer_payments (
        store_pk, local_id, customer_id, customer_name, payment_date, amount, payment_mode,
        cash_amount, online_amount, reference_no, note, created_at,
-       updated_at, version, device_id, deleted, sync_status
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+       updated_at, version, device_id, deleted, sync_status, allocations
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
+       allocations = CASE WHEN $19::boolean THEN EXCLUDED.allocations ELSE customer_payments.allocations END,
        customer_id=EXCLUDED.customer_id, customer_name=EXCLUDED.customer_name,
        payment_date=EXCLUDED.payment_date, amount=EXCLUDED.amount, payment_mode=EXCLUDED.payment_mode,
        cash_amount=EXCLUDED.cash_amount, online_amount=EXCLUDED.online_amount,
@@ -1310,6 +1323,7 @@ async function upsertCustomerPayment(client, storePk, doc, hint = null) {
       Number(doc.cash_amount || 0), Number(doc.online_amount || 0),
       doc.reference_no || null, doc.note || null, createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+      ...allocationParams(doc),
     ]
   );
   const customerId = Number(doc.customer_id);
@@ -1337,9 +1351,10 @@ async function upsertSupplierPayment(client, storePk, doc, hint = null) {
     `INSERT INTO supplier_payments (
        store_pk, local_id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
        reference, due_before, due_after, created_at,
-       updated_at, version, device_id, deleted, sync_status
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+       updated_at, version, device_id, deleted, sync_status, allocations
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
      ON CONFLICT (store_pk, local_id) DO UPDATE SET
+       allocations = CASE WHEN $19::boolean THEN EXCLUDED.allocations ELSE supplier_payments.allocations END,
        payment_no=EXCLUDED.payment_no, supplier_id=EXCLUDED.supplier_id, supplier_name=EXCLUDED.supplier_name,
        payment_date=EXCLUDED.payment_date, amount=EXCLUDED.amount, mode=EXCLUDED.mode,
        reference=EXCLUDED.reference, due_before=EXCLUDED.due_before, due_after=EXCLUDED.due_after,
@@ -1350,6 +1365,7 @@ async function upsertSupplierPayment(client, storePk, doc, hint = null) {
       Number(doc.amount || 0), doc.mode || 'Cash', doc.reference || null,
       Number(doc.due_before || 0), Number(doc.due_after || 0), createdAtOrNow(doc),
       writeTimestamp(meta, existing.rows[0]), meta.version, meta.device_id, meta.deleted, meta.sync_status,
+      ...allocationParams(doc),
     ]
   );
   const supplierId = Number(doc.supplier_id);
@@ -2439,13 +2455,13 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
     case 'customer_payments':
       sql = `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
                     cash_amount, online_amount, reference_no, note, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations
              FROM customer_payments WHERE store_pk=$1${idFilter}${delClause}`;
       break;
     case 'supplier_payments':
       sql = `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
                     reference, due_before, due_after, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations
              FROM supplier_payments WHERE store_pk=$1${idFilter}${delClause}`;
       break;
     case 'sales_returns':
@@ -2633,14 +2649,14 @@ export async function pullCollection(
     case 'customer_payments':
       sql = `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
                     cash_amount, online_amount, reference_no, note, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations
              FROM customer_payments WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;
     case 'supplier_payments':
       sql = `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
                     reference, due_before, due_after, created_at,
-                    updated_at, version, device_id, deleted, sync_status
+                    updated_at, version, device_id, deleted, sync_status, allocations
              FROM supplier_payments WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;

@@ -123,8 +123,14 @@ input.num { width: 72px; text-align: right; padding: 4px 6px; }
 .bp-tot { text-align: right; margin-top: 8px; }
 .bp-total { font-size: 17px; font-weight: 700; }
 
+.print-only { display: none; }
 @media print {
   body { background: #fff; }
+  .print-only { display: block; }
+  /* A report in a box (Payment report) prints alone, without the page behind it. */
+  body:has(.modal-back) .card { display: none !important; }
+  .modal-back { position: static; background: none; padding: 0; display: block; }
+  .modal { max-height: none; overflow: visible; padding: 0; }
   .no-print, .topbar, .subnav { display: none !important; }
   .content { padding: 0; }
   .card { border: none; padding: 0; }

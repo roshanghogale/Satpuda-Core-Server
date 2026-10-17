@@ -207,10 +207,10 @@ assert.match(sp.payment_no, /^PAY\d+-\d+$/);
 step(`supplier payment ${sp.payment_no}`);
 
 // Pay a due from history (owner, 12 Oct 2026): what is open on the bill, then an ordinary
-// payment with the bill number as reference; the bill's own due clears (oldest bill first).
+// payment with the bill number as reference, given to this bill (17 Oct 2026).
 const billDue = await okCall('GET', `/api/web/sales/${sale.id}/due`, { token: owner });
 assert.equal(Math.round(billDue.bill_due * 100) / 100, Math.round((214 - 100 - 17.5 - 50) * 100) / 100);
-assert.equal(billDue.to_clear, billDue.bill_due + billDue.older_due);
+assert.equal(billDue.to_clear, billDue.bill_due);
 assert.equal((await call('GET', `/api/web/sales/${sale.id}/due`, { token: staff })).status, 403);
 await okCall('POST', '/api/web/payments/customers', { token: owner,
   body: { customer_id: billDue.party_id, amount: billDue.to_clear, mode: 'online', reference: billDue.bill_no } });
@@ -223,6 +223,44 @@ await okCall('POST', '/api/web/payments/suppliers', { token: owner,
 const paidPur = await okCall('GET', `/api/web/purchases/${pur.id}/due`, { token: owner });
 assert.ok(paidPur.bill_due <= 0.009, JSON.stringify(paidPur));
 step(`pay from history: bill ${billDue.bill_no} (${billDue.bill_due}) and purchase ${purDue.bill_no} (${purDue.bill_due}) cleared; counter staff refused`);
+
+// Payments given to chosen bills (owner, 17 Oct 2026): the chosen bill clears, older bills
+// keep their due, and the payment list / report say which bill each payment cleared.
+const twoName = `WEB TWO BILLS ${tag}`;
+const b1 = await okCall('POST', '/api/web/sales', { token: owner, body: { customer_name: twoName, items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 0 } });
+const b2 = await okCall('POST', '/api/web/sales', { token: owner, body: { customer_name: twoName, items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 0 } });
+const two = (await okCall('GET', `/api/web/customers?q=${encodeURIComponent(twoName)}`, { token: owner })).rows[0];
+const open2 = await okCall('GET', `/api/web/customers/${two.id}/open-bills`, { token: owner });
+assert.deepEqual(open2.map((b) => b.bill_id), [b1.id, b2.id], 'open bills oldest first');
+const tooMuch = await call('POST', '/api/web/payments/customers', { token: owner,
+  body: { customer_id: two.id, amount: 500, mode: 'cash', allocations: [{ bill_id: b2.id, amount: open2[1].owes + 1 }] } });
+assert.equal(tooMuch.status, 400, 'more than the bill owes is refused');
+const shortPay = await call('POST', '/api/web/payments/customers', { token: owner,
+  body: { customer_id: two.id, amount: 10, mode: 'cash', allocations: [{ bill_id: b2.id, amount: open2[1].owes }] } });
+assert.equal(shortPay.status, 400, 'ticked bills needing more than the amount is refused');
+const chosen = await okCall('POST', '/api/web/payments/customers', { token: owner,
+  body: { customer_id: two.id, amount: open2[1].owes, mode: 'cash', allocations: [{ bill_id: b2.id, bill_no: open2[1].bill_no, amount: open2[1].owes }] } });
+const s1 = await okCall('GET', `/api/web/sales/${b1.id}`, { token: owner });
+const s2 = await okCall('GET', `/api/web/sales/${b2.id}`, { token: owner });
+assert.ok(Number(s2.total_due) <= 0.009 && s2.bill_cleared, 'the chosen (newer) bill is cleared');
+assert.equal(Number(s1.total_due), open2[0].owes, 'the older bill keeps its due');
+const listed = (await okCall('GET', `/api/web/payments/customers?customer_id=${two.id}&with_cleared=1`, { token: owner })).rows;
+const row = listed.find((p) => Number(p.id) === Number(chosen.id));
+assert.deepEqual(row.cleared.map((c) => [c.bill_id, c.amount, c.how]), [[b2.id, open2[1].owes, 'chosen']]);
+const payRep = await okCall('GET', `/api/web/payments/report?kind=customers&party_id=${two.id}`, { token: owner });
+assert.equal(payRep.totals.count, 1);
+assert.equal(payRep.totals.cleared, open2[1].owes);
+const rest = await okCall('POST', '/api/web/payments/customers', { token: owner, body: { customer_id: two.id, amount: open2[0].owes + 5, mode: 'cash' } });
+const rep2 = await okCall('GET', `/api/web/payments/report?kind=customers&party_id=${two.id}`, { token: owner });
+const restRow = rep2.rows.find((p) => Number(p.id) === Number(rest.id));
+assert.deepEqual(restRow.cleared.map((c) => [c.bill_id, c.how]), [[b1.id, 'oldest']]);
+assert.equal(restRow.left_as_credit, 5);
+// The chosen bill deleted: its money goes back to the oldest-first rule (and the stock back).
+await okCall('DELETE', `/api/web/sales/${b2.id}`, { token: owner });
+const rep3 = await okCall('GET', `/api/web/payments/report?kind=customers&party_id=${two.id}`, { token: owner });
+assert.ok(rep3.rows.find((p) => Number(p.id) === Number(chosen.id)).cleared.every((c) => c.how === 'oldest'));
+await okCall('DELETE', `/api/web/sales/${b1.id}`, { token: owner });
+step(`payment given to the newer bill ${b2.bill_no} clears it, ${b1.bill_no} keeps its due; report shows chosen / oldest / credit`);
 
 // Walk-in (owner, 9 Oct 2026): no customer name = the shop's COUNTER SALE customer, paid in full.
 const walk = await okCall('POST', '/api/web/sales', { token: staff, body: { items: [{ medicine_id: syr.id, qty: 1 }], cash_paid: 80 } });
@@ -269,6 +307,18 @@ if (dev?.token) {
   const cols = new Set((ch.changes || []).map((c) => c.collection));
   assert.ok(cols.has('sales') && cols.has('purchases') && cols.has('medicines'));
   step('a paired device pulls the web sales, purchases and medicines');
+  // The bills a payment was given travel with it; an older app's edit (no allocations key)
+  // keeps them.
+  const pulled = (ch.changes || []).find((c) => c.collection === 'customer_payments' && Number(c.local_id) === Number(chosen.id))?.doc;
+  assert.deepEqual((pulled?.allocations || []).map((a) => a.bill_id), [b2.id], JSON.stringify(pulled));
+  const oldApp = { ...pulled, note: 'edited on an older app', version: Number(pulled.version) + 1, updated_at: new Date().toISOString() };
+  delete oldApp.allocations;
+  await okCall('POST', '/api/sync/bundle', { token: dev.token, body: { customer_payments: [oldApp] } });
+  const ch2 = await okCall('GET', '/api/sync/changes/full?after=0&limit=5000', { token: dev.token });
+  const kept = (ch2.changes || []).find((c) => c.collection === 'customer_payments' && Number(c.local_id) === Number(chosen.id))?.doc;
+  assert.equal(kept?.note, 'edited on an older app');
+  assert.deepEqual((kept?.allocations || []).map((a) => a.bill_id), [b2.id]);
+  step('the bills a payment was given reach devices, and an older app editing it keeps them');
 }
 
 // clean up the logins this run made
