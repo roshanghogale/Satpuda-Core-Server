@@ -229,7 +229,7 @@ router.get('/returns/sales', asyncHandler(async (req, res) => {
   params.push(limit);
   const { rows } = await query(
     `SELECT local_id AS id, return_no, sale_id, bill_no, customer_id, customer_name,
-            return_date, refund_amount, discount, reason, item_count, created_at
+            return_date, refund_amount, discount, reason, item_count, created_at, allocations, settle_mode
      FROM sales_returns WHERE ${where}
      ORDER BY return_date DESC, local_id DESC LIMIT $${params.length}`,
     params,
@@ -253,7 +253,7 @@ router.get('/returns/purchases', asyncHandler(async (req, res) => {
   params.push(limit);
   const { rows } = await query(
     `SELECT local_id AS id, return_no, purchase_id, purchase_no, supplier_id, supplier_name,
-            return_date, refund_amount, discount, reason, item_count, created_at
+            return_date, refund_amount, discount, reason, item_count, created_at, allocations, settle_mode
      FROM purchase_returns WHERE ${where}
      ORDER BY return_date DESC, local_id DESC LIMIT $${params.length}`,
     params,
