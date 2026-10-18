@@ -10,6 +10,7 @@ import * as provisions from '../services/provisionService.js';
 import { query } from '../db/pool.js';
 import * as syncV2 from '../services/syncV2.js';
 import { latestChecks, runStoreCheck } from '../services/nightlyCheck.js';
+import { adminStoreLink, licensePayloadWithLinks } from '../services/wholesaleStore.js';
 
 const router = Router();
 router.use(requireAdmin);
@@ -39,6 +40,9 @@ router.get('/stores/:id', asyncHandler(async (req, res) => {
   const sync = await getAdminSyncOverview(store.id);
   ok(res, {
     store,
+    // Wholesale is a separate store: the retail store's companion, or the retail
+    // store a wholesale store belongs to.
+    wholesale_link: await adminStoreLink(store),
     profile: profile.rows[0] || null,
     devices: devices.rows,
     dashboard: dash,
@@ -209,10 +213,10 @@ router.post('/stores/:id/license', asyncHandler(async (req, res) => {
     // the only caller allowed to move a date that is already set.
     patch.force_activation_date = true;
   }
-  const { updateStoreLicenseRow, licensePayload } = await import('../services/licenseService.js');
+  const { updateStoreLicenseRow } = await import('../services/licenseService.js');
   const { signLicense, sealAvailable } = await import('../services/licenseSeal.js');
   const row = await updateStoreLicenseRow(store.id, patch);
-  const license = licensePayload(row);
+  const license = await licensePayloadWithLinks(row);
   ok(res, {
     license,
     signed: signLicense({

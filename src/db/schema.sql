@@ -52,6 +52,15 @@ ALTER TABLE stores ADD COLUMN IF NOT EXISTS voice_tier TEXT NOT NULL DEFAULT 'au
 -- of the signed licence blob: a missing value anywhere on the desktop means OFF.
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS wholesale_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 
+-- Wholesale is a SEPARATE store (owner, 18 Oct 2026): a retail store with
+-- wholesale_enabled gets a companion store of its own (store_kind 'wholesale',
+-- parent_store_id = the retail store), made by services/wholesaleStore.js with its
+-- own SC- key and its own data. Deleting the retail store leaves the companion.
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS store_kind TEXT NOT NULL DEFAULT 'retail'
+  CHECK (store_kind IN ('retail', 'wholesale'));
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS parent_store_id INTEGER NULL REFERENCES stores(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS idx_stores_parent_store_id ON stores(parent_store_id) WHERE parent_store_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_stores_android_key ON stores(android_key) WHERE android_key IS NOT NULL;
 
 -- Self-service trial: this store was created by the installer through

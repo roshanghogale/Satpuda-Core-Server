@@ -109,12 +109,21 @@ export default function Stores() {
                 <tr key={s.id}>
                   <td>
                     <strong>{s.store_name}</strong>
+                    {s.store_kind === 'wholesale' && (
+                      <span className="badge" style={{ marginLeft: 8 }}
+                        title={s.parent_store_name ? `Wholesale store of ${s.parent_store_name}` : 'Wholesale store'}>
+                        WHOLESALE
+                      </span>
+                    )}
                     {s.provisioned_trial ? (
                       <span className="badge" style={{ marginLeft: 8 }}>TRIAL</span>
                     ) : s.trial_device_id ? (
                       <span className="badge" style={{ marginLeft: 8 }}>INSTALLER</span>
                     ) : null}
                     <div className="muted mono">{s.store_id}</div>
+                    {s.store_kind === 'wholesale' && s.parent_store_name && (
+                      <div className="muted" style={{ fontSize: '0.7rem' }}>wholesale store of {s.parent_store_name}</div>
+                    )}
                     {s.trial_device_id && (
                       <div className="muted mono" style={{ fontSize: '0.7rem' }}>
                         installer · {s.trial_ip || 'no address'}

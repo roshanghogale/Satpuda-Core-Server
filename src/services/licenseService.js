@@ -131,6 +131,10 @@ export function licensePayload(store) {
     // Wholesale mode (beta) switch, admin panel only, same rules as voice: not
     // signed, and a desktop that finds no field treats wholesale as OFF.
     ...wholesaleFields(store),
+    // 'retail' | 'wholesale' (a wholesale store is a separate store linked to its
+    // retail one; services/wholesaleStore.js adds the wholesale_store / retail_store
+    // links where the routes answer). Missing = retail.
+    store_kind: store?.store_kind === 'wholesale' ? 'wholesale' : 'retail',
   };
 }
 
@@ -152,7 +156,8 @@ export function evaluateAccess(store, today = null) {
 /** The columns a licence is decided from, plus the row version the seal signs. */
 const LICENSE_COLS = `id, store_id, store_key, store_name, is_active,
             activation_date, expiry_enabled, expiry_date, apply_expiry_check,
-            provisioned_trial, voice_enabled, voice_tier, wholesale_enabled, updated_at`;
+            provisioned_trial, voice_enabled, voice_tier, wholesale_enabled,
+            store_kind, parent_store_id, updated_at`;
 
 /**
  * The raw store row behind a licence.
@@ -243,7 +248,8 @@ export async function updateStoreLicenseRow(storePk, patch = {}) {
     `UPDATE stores SET ${fields.join(', ')} WHERE id = $${i} RETURNING
        id, store_id, store_key, store_name, is_active,
        activation_date, expiry_enabled, expiry_date, apply_expiry_check,
-       provisioned_trial, voice_enabled, voice_tier, wholesale_enabled, updated_at`,
+       provisioned_trial, voice_enabled, voice_tier, wholesale_enabled,
+       store_kind, parent_store_id, updated_at`,
     vals
   );
   if (!rows[0]) throw new AppError(404, 'Store not found');

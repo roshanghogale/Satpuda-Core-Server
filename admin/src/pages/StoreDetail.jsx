@@ -272,6 +272,51 @@ function DeleteStorePanel({ store }) {
   );
 }
 
+/**
+ * Wholesale is a separate store linked to its retail one. A retail store shows its
+ * wholesale store (name, store id, SC key); a wholesale store shows whose it is.
+ */
+function WholesaleLinkPanel({ store, link }) {
+  if (!link) return null;
+  if (store.store_kind === 'wholesale') {
+    const r = link.retail;
+    return (
+      <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
+        <div className="muted" style={{ fontSize: '0.78rem', marginBottom: 4 }}>Wholesale store of</div>
+        {r ? (
+          <div>
+            <Link to={`/stores/${r.store_id}`}><strong>{r.store_name}</strong></Link>
+            <span className="muted mono" style={{ marginLeft: 8 }}>{r.store_id}</span>
+          </div>
+        ) : (
+          <div className="muted">The retail store is no longer on the server.</div>
+        )}
+        <div className="muted" style={{ fontSize: '0.78rem', marginTop: 6 }}>
+          Its own medicines, purchases, sales, customers and payments; nothing is shared with the retail store.
+          {store.wholesale_enabled ? '' : ' Wholesale is switched off on the retail store, so it is not offered to the shop.'}
+        </div>
+      </div>
+    );
+  }
+  const c = link.companion;
+  if (!c) return null;
+  return (
+    <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
+      <div className="muted" style={{ fontSize: '0.78rem', marginBottom: 4 }}>
+        Wholesale store {c.wholesale_enabled && store.wholesale_enabled ? '' : '(switched off, data kept)'}
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
+        <div>
+          <Link to={`/stores/${c.store_id}`}><strong>{c.store_name}</strong></Link>
+          <div className="muted mono">{c.store_id}</div>
+        </div>
+        <div className="key-box">{c.android_key || '—'}</div>
+        {!c.is_active && <span className="badge off">OFF</span>}
+      </div>
+    </div>
+  );
+}
+
 function AccessControlPanel({ store, onSave }) {
   const [isActive, setIsActive] = useState(Boolean(store.is_active));
   const [applyExpiry, setApplyExpiry] = useState(store.apply_expiry_check !== false);
@@ -705,6 +750,13 @@ export default function StoreDetail() {
     setError('');
     const store = await api(`/admin/stores/${id}`, { method: 'PATCH', body: patch });
     setData((d) => ({ ...d, store }));
+    // Wholesale ON makes the linked wholesale store; re-read the link so it shows.
+    if (patch.wholesale_enabled !== undefined) {
+      try {
+        const fresh = await api(`/admin/stores/${id}`);
+        setData((d) => ({ ...d, store: fresh.store, wholesale_link: fresh.wholesale_link }));
+      } catch { /* the save itself went through */ }
+    }
     return store;
   }
 
@@ -719,14 +771,19 @@ export default function StoreDetail() {
   if (error && !data) return <div className="error">{error}</div>;
   if (!data) return <p className="muted">Loading store…</p>;
 
-  const { store, profile, devices, dashboard: dash, sync } = data;
+  const { store, profile, devices, dashboard: dash, sync, wholesale_link: wsLink } = data;
 
   return (
     <>
       <div className="page-title">
         <div>
           <p style={{ margin: 0 }}><Link to="/stores">← Stores</Link></p>
-          <h2>{store.store_name}</h2>
+          <h2>
+            {store.store_name}
+            {store.store_kind === 'wholesale' && (
+              <span className="badge" style={{ marginLeft: 8, verticalAlign: 'middle' }}>WHOLESALE</span>
+            )}
+          </h2>
           <p className="mono">{store.store_id} · {store.store_key}</p>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -752,6 +809,7 @@ export default function StoreDetail() {
         </div>
       </div>
 
+      <WholesaleLinkPanel store={store} link={wsLink} />
       <AccessControlPanel store={store} onSave={saveAccess} />
       <SyncHealthPanel store={store} />
       <DeleteStorePanel store={store} />

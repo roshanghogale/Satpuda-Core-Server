@@ -10,11 +10,10 @@ import {
 import { healthCheck } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
 import {
-  getStoreLicense,
   getStoreRecord,
-  licensePayload,
-  updateStoreLicense,
+  updateStoreLicenseRow,
 } from '../services/licenseService.js';
+import { STORE_LINK_FIELDS, licensePayloadWithLinks, storeKindOf } from '../services/wholesaleStore.js';
 import { sealAvailable, signLicense } from '../services/licenseSeal.js';
 
 const router = Router();
@@ -71,8 +70,11 @@ router.post('/auth/pair', asyncHandler(async (req, res) => {
       store_name: result.store.store_name,
       app_mode: result.store.app_mode,
       android_key: result.store.android_key,
+      store_kind: storeKindOf(result.store),
     },
-    license: licensePayload(result.store),
+    // store_kind + wholesale_store / retail_store ride on the licence (wholesale is
+    // a separate store linked to its retail one; services/wholesaleStore.js).
+    license: await licensePayloadWithLinks(result.store),
   });
 }));
 
@@ -80,7 +82,7 @@ router.post('/auth/pair', asyncHandler(async (req, res) => {
 router.get('/auth/license', requireStoreIdentity, asyncHandler(async (req, res) => {
   if (req.auth.type !== 'store') throw new AppError(403, 'Store token required');
   const storePk = req.auth.storePk || req.auth.store?.id;
-  ok(res, await getStoreLicense(storePk));
+  ok(res, await licensePayloadWithLinks(await getStoreRecord(storePk)));
 }));
 
 /** PC Administrator / Online activation updates license on server */
@@ -96,12 +98,14 @@ router.put('/auth/license', requireStoreIdentity, asyncHandler(async (req, res) 
   const body = { ...(req.body || {}) };
   // The voice and wholesale switches are the vendor's to flip from the admin
   // panel, never the shop's (updateStoreLicenseRow ignores them anyway; this
-  // keeps it that way if that function ever learns to write them).
+  // keeps it that way if that function ever learns to write them). The same
+  // for the retail/wholesale link: a device paired with the retail store must
+  // not be able to re-point, unlink or re-kind either store.
   for (const k of ['is_active', 'expiry_enabled', 'apply_expiry_check', 'expiry_date', 'force_activation_date',
-    'voice_enabled', 'voice_tier', 'wholesale_enabled']) {
+    'voice_enabled', 'voice_tier', 'wholesale_enabled', ...STORE_LINK_FIELDS]) {
     delete body[k];
   }
-  ok(res, await updateStoreLicense(storePk, body));
+  ok(res, await licensePayloadWithLinks(await updateStoreLicenseRow(storePk, body)));
 }));
 
 /**
@@ -124,7 +128,7 @@ router.post('/auth/license/signed', requireStoreIdentity, asyncHandler(async (re
   const storePk = req.auth.storePk || req.auth.store?.id;
   const body = req.body || {};
   const store = await getStoreRecord(storePk);
-  const license = licensePayload(store);
+  const license = await licensePayloadWithLinks(store);
   const signed = signLicense({
     store,
     license,

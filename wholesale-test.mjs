@@ -41,6 +41,7 @@ const deepEq = (a, b, what) => assert(JSON.stringify(a) === JSON.stringify(b),
 
 // ─── fake stores table (licence path) ─────────────────────────────────────────
 const { pool } = await import('./src/db/pool.js');
+const { companionStatement, fakeConnect } = await import('./test/fakeStoresDb.mjs');
 
 const DEFAULTS = {
   app_mode: 'online', is_active: true, device_role: 'pc', notes: null,
@@ -122,8 +123,13 @@ pool.query = async (text, vals = []) => {
   for (const [re, rows] of pullRows) {
     if (re.test(sql)) return { rows: rows.map((r) => JSON.parse(JSON.stringify(r))) };
   }
+  // Switching wholesale ON makes the linked wholesale store (services/wholesaleStore.js;
+  // wholesale-store-test.mjs checks that part).
+  const companion = await companionStatement(stores, sql, vals);
+  if (companion) return companion;
   throw new Error(`fake db: unexpected statement: ${sql.slice(0, 160)}`);
 };
+pool.connect = fakeConnect((text, vals) => pool.query(text, vals));
 
 // ─── the real routers on a local port ─────────────────────────────────────────
 const { default: authRoutes } = await import('./src/routes/auth.js');
@@ -221,7 +227,7 @@ try {
       'STORE_AUTH_COLS misses wholesale_enabled');
     const ls = read('src/services/licenseService.js');
     assert(/wholesale_enabled/.test(ls.match(/LICENSE_COLS = `[^`]+`/)[0]), 'LICENSE_COLS misses it');
-    assert(/provisioned_trial, voice_enabled, voice_tier, wholesale_enabled, updated_at`,\s*\r?\n\s*vals/.test(ls),
+    assert(/provisioned_trial, voice_enabled, voice_tier, wholesale_enabled,\s*store_kind, parent_store_id, updated_at`,\s*\r?\n\s*vals/.test(ls),
       'updateStoreLicenseRow RETURNING misses it');
   });
 
@@ -288,7 +294,7 @@ try {
     eq(stores.get(store.id).wholesale_enabled, true, 'stored');
   });
   await check('the device-facing UPDATE never names wholesale_enabled', () => {
-    const writes = seen.filter((s) => /^UPDATE stores SET/.test(s) && /RETURNING id, store_id/.test(s));
+    const writes = seen.filter((s) => /^UPDATE stores SET/.test(s) && /RETURNING id, store_id, store_key, store_name, is_active/.test(s));
     assert(writes.length > 0, 'no device update was seen');
     for (const w of writes) {
       const set = w.slice(0, w.indexOf(' WHERE '));

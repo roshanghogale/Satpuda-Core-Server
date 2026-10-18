@@ -1,6 +1,7 @@
 import { query } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
 import { parseVoiceTier, VOICE_TIERS } from './licenseService.js';
+import { ensureWholesaleCompanion, switchOffCompanion, storeKindOf } from './wholesaleStore.js';
 import {
   generateAndroidKey,
   slugifyStoreId,
@@ -143,7 +144,9 @@ export async function listStores() {
        (SELECT COALESCE(SUM(total_amount),0) FROM sales x
           WHERE x.store_pk=s.id AND NOT x.deleted AND NOT x.is_autosave
             AND bill_date >= date_trunc('month', CURRENT_DATE)::date) AS month_sales,
-       (SELECT COUNT(*) FROM store_devices d WHERE d.store_pk=s.id) AS device_count
+       (SELECT COUNT(*) FROM store_devices d WHERE d.store_pk=s.id) AS device_count,
+       -- Wholesale is a separate store: the list tags it and names its retail store.
+       (SELECT ps.store_name FROM stores ps WHERE ps.id = s.parent_store_id) AS parent_store_name
      FROM stores s
      LEFT JOIN LATERAL (
        SELECT device_id, ip, created_at FROM store_provisions sp
@@ -258,6 +261,14 @@ export async function updateStore(idOrSlug, patch) {
   // requireAuth caches the store row, so without this the PC and Android keep
   // working until the cache lapses — and a live WebSocket never noticed at all.
   await applyLicenceChangeNow(updated);
+
+  // Wholesale is a SEPARATE store linked to this one (WHOLESALE_DESIGN.md). ON
+  // makes (or re-enables) the companion; OFF never deletes it, it only switches
+  // the companion's own flag off so the retail store stops offering it.
+  if (patch.wholesale_enabled !== undefined && storeKindOf(updated) === 'retail') {
+    if (updated.wholesale_enabled === true) await ensureWholesaleCompanion(updated.id);
+    else await switchOffCompanion(updated.id);
+  }
   return updated;
 }
 
