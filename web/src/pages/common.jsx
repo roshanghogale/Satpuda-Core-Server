@@ -194,6 +194,7 @@ export function PayDue({ kind, billId, onDone, onCancel }) {
   const [info, setInfo] = useState(null);
   const [amount, setAmount] = useState('');
   const [mode, setMode] = useState('cash');
+  const [receipt, setReceipt] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -212,8 +213,8 @@ export function PayDue({ kind, billId, onDone, onCancel }) {
       const allocations = info.bill_due > 0.009
         ? [{ bill_id: info.bill_id, bill_no: shortNo(info.bill_no), amount: Math.min(amt, info.bill_due) }] : [];
       const body = sale
-        ? { customer_id: info.party_id, amount: amt, mode, reference: shortNo(info.bill_no), note: `Paid from Sales History (${shortNo(info.bill_no)})`, allocations }
-        : { supplier_id: info.party_id, amount: amt, mode, reference: shortNo(info.bill_no), allocations };
+        ? { customer_id: info.party_id, amount: amt, mode, reference: shortNo(info.bill_no), note: `Paid from Sales History (${shortNo(info.bill_no)})`, allocations, receipt_no: receipt }
+        : { supplier_id: info.party_id, amount: amt, mode, reference: shortNo(info.bill_no), allocations, receipt_no: receipt };
       await api(sale ? '/payments/customers' : '/payments/suppliers', { method: 'POST', body });
       onDone(sale
         ? `₹ ${money(amount)} received from ${info.party} against ${shortNo(info.bill_no)}.`
@@ -238,6 +239,7 @@ export function PayDue({ kind, billId, onDone, onCancel }) {
         <label>Mode<select value={mode} onChange={(e) => setMode(e.target.value)}>
           <option value="cash">Cash</option><option value="online">Online</option>
         </select></label>
+        <label>Receipt no.<input value={receipt} onChange={(e) => setReceipt(e.target.value)} placeholder="optional" /></label>
       </div>
       {error && <div className="error">{error}</div>}
       <div className="row">

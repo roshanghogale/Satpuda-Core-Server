@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
-import { api, clearToken, getToken, setToken, whenSignedOut } from './api.js';
+import { api, clearToken, getToken, setStoreChoice, setToken, storeChoice, whenSignedOut, whenWholesaleOff } from './api.js';
 import Billing from './pages/Billing.jsx';
+import WholesaleBilling from './pages/WholesaleBilling.jsx';
 import SalesHistory from './pages/SalesHistory.jsx';
 import Purchases from './pages/Purchases.jsx';
 import Inventory from './pages/Inventory.jsx';
@@ -12,7 +13,7 @@ import Password from './pages/Password.jsx';
 
 /** Menu: each entry shows only when the login has one of its permissions. */
 const MENU = [
-  { to: '/billing', label: 'Billing', any: ['billing'] },
+  { to: '/billing', label: 'Billing', wsLabel: 'Wholesale bill', any: ['billing'] },
   { to: '/sales', label: 'Sales history', any: ['sales_view'] },
   { to: '/purchases', label: 'Purchases', any: ['purchase_view', 'purchase_entry'] },
   { to: '/inventory', label: 'Inventory', any: ['inventory_view'] },
@@ -20,6 +21,40 @@ const MENU = [
   { to: '/reports', label: 'Reports', any: ['reports'] },
   { to: '/staff', label: 'Staff', any: ['staff'] },
 ];
+
+/**
+ * Retail | Wholesale (owner, 18 Oct 2026): the wholesale store is a separate store (its own
+ * medicines, rates, purchases, sales and stock), so the switch opens the other store; nothing
+ * is copied between them. Shown when this login's store has its wholesale store switched on.
+ */
+function StoreSwitch({ me, onSwitch }) {
+  const ws = me.store_kind === 'wholesale';
+  if (!me.switchable && !ws) return null;
+  const retailName = me.home_store_name || 'Retail';
+  const wsName = me.wholesale_store?.store_name || me.store_name;
+  function go(kind) {
+    if ((kind === 'wholesale') === ws) return;
+    const text = kind === 'wholesale'
+      ? `Open ${wsName}?
+
+Wholesale is a separate store: its own medicines, rates, purchases, sales and stock. Nothing is copied from retail.`
+      : `Go back to ${retailName}?`;
+    if (!window.confirm(text)) return;
+    setStoreChoice(kind);
+    onSwitch();
+  }
+  return (
+    <div className="store-switch">
+      {me.switchable && (
+        <div className="seg" role="group" aria-label="Retail or wholesale store">
+          <button className={ws ? '' : 'on'} onClick={() => go('retail')} title={retailName}>Retail</button>
+          <button className={ws ? 'on' : ''} onClick={() => go('wholesale')} title={wsName}>Wholesale</button>
+        </div>
+      )}
+      {ws && <span className="ws-badge">WHOLESALE</span>}
+    </div>
+  );
+}
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('');
@@ -71,8 +106,21 @@ export default function App() {
 
   useEffect(() => {
     whenSignedOut(() => { setMe(null); setState('out'); });
+    // The wholesale store was switched off while open: back to retail, read the login again.
+    whenWholesaleOff(() => { load(); nav('/'); });
     if (getToken()) load();
-  }, [load]);
+  }, [load, nav]);
+
+  // A choice of wholesale this login may no longer make (switched off) reads as retail.
+  useEffect(() => {
+    if (me && storeChoice() === 'wholesale' && me.store_kind !== 'wholesale') setStoreChoice('retail');
+  }, [me]);
+
+  async function switched() {
+    setState('loading');
+    await load();
+    nav('/');
+  }
 
   async function logout() {
     try { await api('/auth/logout', { method: 'POST' }); } catch { /* signed out anyway */ }
@@ -99,18 +147,21 @@ export default function App() {
 
   const perms = new Set(me.permissions);
   const can = (...p) => p.some((x) => perms.has(x));
+  const ws = me.store_kind === 'wholesale';
   const menu = MENU.filter((m) => can(...m.any));
   const home = menu[0]?.to || '/password';
+  const BillingPage = ws ? WholesaleBilling : Billing;
 
   return (
-    <div className="shell">
+    <div className={`shell${ws ? ' wholesale' : ''}`}>
       <header className="topbar no-print">
         <div className="brand">
           <strong>{me.profile?.name || me.store_name}</strong>
           <span className="muted small">Satpuda Core web · online only</span>
         </div>
+        <StoreSwitch me={me} onSwitch={switched} />
         <nav className="menu">
-          {menu.map((m) => <NavLink key={m.to} to={m.to}>{m.label}</NavLink>)}
+          {menu.map((m) => <NavLink key={m.to} to={m.to}>{ws && m.wsLabel ? m.wsLabel : m.label}</NavLink>)}
         </nav>
         <div className="who">
           <NavLink to="/password" className="small">{me.user.full_name || me.user.username}{me.user.role === 'owner' ? ' (owner)' : ''}</NavLink>
@@ -120,13 +171,13 @@ export default function App() {
       <main className="content">
         <Routes>
           <Route path="/" element={<Navigate to={home} replace />} />
-          {can('billing') && <Route path="/billing" element={<Billing me={me} can={can} />} />}
-          {can('sales_edit') && <Route path="/billing/edit/:id" element={<Billing me={me} can={can} />} />}
-          {can('sales_view') && <Route path="/sales" element={<SalesHistory me={me} can={can} />} />}
-          {can('purchase_view', 'purchase_entry') && <Route path="/purchases/*" element={<Purchases me={me} can={can} />} />}
-          {can('inventory_view') && <Route path="/inventory" element={<Inventory can={can} />} />}
-          {can('parties') && <Route path="/parties" element={<Parties can={can} />} />}
-          {can('reports') && <Route path="/reports" element={<Reports me={me} />} />}
+          {can('billing') && <Route path="/billing" element={<BillingPage key={me.store_kind} me={me} can={can} />} />}
+          {can('sales_edit') && <Route path="/billing/edit/:id" element={<BillingPage key={me.store_kind} me={me} can={can} />} />}
+          {can('sales_view') && <Route path="/sales" element={<SalesHistory key={me.store_kind} me={me} can={can} />} />}
+          {can('purchase_view', 'purchase_entry') && <Route path="/purchases/*" element={<Purchases key={me.store_kind} me={me} can={can} />} />}
+          {can('inventory_view') && <Route path="/inventory" element={<Inventory key={me.store_kind} me={me} can={can} />} />}
+          {can('parties') && <Route path="/parties" element={<Parties key={me.store_kind} me={me} can={can} />} />}
+          {can('reports') && <Route path="/reports" element={<Reports key={me.store_kind} me={me} />} />}
           {can('staff') && <Route path="/staff" element={<Staff me={me} />} />}
           <Route path="/password" element={<div className="card narrow"><h2>Change my password</h2><Password onDone={load} /></div>} />
           <Route path="*" element={<div className="card">This screen is not available for your login. <NavLink to={home}>Go back</NavLink></div>} />

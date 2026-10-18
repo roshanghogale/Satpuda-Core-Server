@@ -16,10 +16,27 @@ export function clearToken() {
 let onSignedOut = () => {};
 export function whenSignedOut(fn) { onSignedOut = fn; }
 
+// Retail | Wholesale (owner, 18 Oct 2026): the wholesale store is a separate store, the retail
+// store's companion. The switch keeps the choice in this browser; every request says which
+// store it is for, and the server checks the login may act for it.
+const STORE_KEY = 'satpuda_web_store';
+export function storeChoice() {
+  try { return localStorage.getItem(STORE_KEY) === 'wholesale' ? 'wholesale' : 'retail'; } catch { return 'retail'; }
+}
+export function setStoreChoice(kind) {
+  try {
+    if (kind === 'wholesale') localStorage.setItem(STORE_KEY, 'wholesale');
+    else localStorage.removeItem(STORE_KEY);
+  } catch { /* private window: retail */ }
+}
+let onStoreOff = () => {};
+export function whenWholesaleOff(fn) { onStoreOff = fn; }
+
 export async function api(path, { method = 'GET', body } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   const t = getToken();
   if (t) headers.Authorization = `Bearer ${t}`;
+  if (storeChoice() === 'wholesale') headers['X-Satpuda-Store'] = 'wholesale';
   let res;
   try {
     res = await fetch(`/api/web${path}`, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
@@ -31,10 +48,15 @@ export async function api(path, { method = 'GET', body } = {}) {
     clearToken();
     onSignedOut();
   }
+  if (res.status === 409 && json.details?.code === 'wholesale_off') {
+    setStoreChoice('retail');
+    onStoreOff();
+  }
   if (!res.ok || json.ok === false) {
     const err = new Error(json.error || res.statusText || 'Request failed');
     err.status = res.status;
     err.code = json.details?.code;
+    err.details = json.details;
     throw err;
   }
   return json.data;

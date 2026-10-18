@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, fmtDate, money, qs, shortNo } from '../api.js';
 import { PartyPicker, printNow, useDebounced } from './common.jsx';
+import { PartyForm } from './wholesale.jsx';
 
 const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
 
@@ -13,6 +14,7 @@ function PayForm({ kind, party, onDone, onClose }) {
   const [typed, setTyped] = useState(false);
   const [mode, setMode] = useState('cash');
   const [note, setNote] = useState('');
+  const [receipt, setReceipt] = useState('');
   const [how, setHow] = useState('oldest');
   const [bills, setBills] = useState(null);
   const [pick, setPick] = useState({});
@@ -36,8 +38,8 @@ function PayForm({ kind, party, onDone, onClose }) {
     try {
       const allocations = how === 'choose' ? ticked : [];
       const body = kind === 'customers'
-        ? { customer_id: party.id, amount: amt, mode, note, allocations }
-        : { supplier_id: party.id, amount: amt, mode, reference: note, allocations };
+        ? { customer_id: party.id, amount: amt, mode, note, allocations, receipt_no: receipt }
+        : { supplier_id: party.id, amount: amt, mode, reference: note, allocations, receipt_no: receipt };
       await api(`/payments/${kind}`, { method: 'POST', body });
       onDone(`${kind === 'customers' ? 'Received' : 'Paid'} ₹ ${money(amt)} ${kind === 'customers' ? 'from' : 'to'} ${party.name}.`);
     } catch (e) { setError(e.message); }
@@ -72,6 +74,7 @@ function PayForm({ kind, party, onDone, onClose }) {
         {short && <div className="error">The bills you ticked need ₹ {money(tickedSum)}; the amount is ₹ {money(amt)}.</div>}
         <label>Mode<select value={mode} onChange={(e) => setMode(e.target.value)}><option value="cash">Cash</option><option value="online">Online</option></select></label>
         <label>{kind === 'customers' ? 'Note' : 'Reference'}<input value={note} onChange={(e) => setNote(e.target.value)} /></label>
+        <label>Receipt no.<input value={receipt} onChange={(e) => setReceipt(e.target.value)} placeholder="the paper receipt's number (optional)" /></label>
         {error && <div className="error">{error}</div>}
         <div className="row end"><button className="btn" onClick={onClose}>Cancel</button><button className="btn primary" disabled={!(amt > 0) || short} onClick={save}>Save</button></div>
       </div>
@@ -110,15 +113,15 @@ function PaymentReport({ kind, onClose }) {
   }, [kind, from, to, party?.id]);
   const cust = kind === 'customers';
   function csv() {
-    const head = ['Date', cust ? 'Reference' : 'Payment no', cust ? 'Customer' : 'Supplier', 'Mode', 'Amount', 'Bill', 'Bill date', 'Cleared', 'How'];
+    const head = ['Date', cust ? 'Reference' : 'Payment no', 'Receipt no', cust ? 'Customer' : 'Supplier', 'Mode', 'Amount', 'Bill', 'Bill date', 'Cleared', 'How'];
     const lines = [head];
     for (const p of data.rows) {
-      const base = [p.payment_date?.slice(0, 10), cust ? shortNo(p.reference_no || '') : p.payment_no, p.customer_name || p.supplier_name, p.payment_mode || p.mode, r2(p.amount)];
+      const base = [p.payment_date?.slice(0, 10), cust ? shortNo(p.reference_no || '') : p.payment_no, p.receipt_no || '', p.customer_name || p.supplier_name, p.payment_mode || p.mode, r2(p.amount)];
       if (!p.cleared.length) lines.push([...base, '', '', '', '']);
-      p.cleared.forEach((c, i) => lines.push([...(i ? ['', '', '', '', ''] : base), c.bill_no, c.bill_date, c.amount, c.how]));
-      if (p.left_as_credit > 0.009) lines.push(['', '', '', '', '', 'Left as credit', '', p.left_as_credit, '']);
+      p.cleared.forEach((c, i) => lines.push([...(i ? ['', '', '', '', '', ''] : base), c.bill_no, c.bill_date, c.amount, c.how]));
+      if (p.left_as_credit > 0.009) lines.push(['', '', '', '', '', '', 'Left as credit', '', p.left_as_credit, '']);
     }
-    lines.push(['Total', '', '', '', data.totals.amount, '', '', data.totals.cleared, '']);
+    lines.push(['Total', '', '', '', '', data.totals.amount, '', '', data.totals.cleared, '']);
     const blob = new Blob([`﻿${lines.map((l) => l.map(csvCell).join(',')).join('\r\n')}\r\n`], { type: 'text/csv' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -143,13 +146,13 @@ function PaymentReport({ kind, onClose }) {
         {error && <div className="error">{error}</div>}
         {!data ? <div className="muted">{error ? '' : 'Reading…'}</div> : (
           <table className="grid compact">
-            <thead><tr><th>Date</th><th>{cust ? 'Reference' : 'No'}</th><th>{cust ? 'Customer' : 'Supplier'}</th><th>Mode</th>
+            <thead><tr><th>Date</th><th>{cust ? 'Reference' : 'No'}</th><th>Receipt no.</th><th>{cust ? 'Customer' : 'Supplier'}</th><th>Mode</th>
               <th className="r">Amount</th><th>Bills cleared</th></tr></thead>
             <tbody>{data.rows.map((p) => (
-              <tr key={p.id}><td>{fmtDate(p.payment_date)}</td><td>{cust ? shortNo(p.reference_no || '') : p.payment_no}</td>
+              <tr key={p.id}><td>{fmtDate(p.payment_date)}</td><td>{cust ? shortNo(p.reference_no || '') : p.payment_no}</td><td>{p.receipt_no || ''}</td>
                 <td>{p.customer_name || p.supplier_name}</td><td className="small">{p.payment_mode || p.mode}</td>
                 <td className="r">{money(p.amount)}</td><td><Cleared p={p} /></td></tr>))}</tbody>
-            <tfoot><tr><td colSpan={4}><b>{data.totals.count} payments</b></td><td className="r"><b>{money(data.totals.amount)}</b></td>
+            <tfoot><tr><td colSpan={5}><b>{data.totals.count} payments</b></td><td className="r"><b>{money(data.totals.amount)}</b></td>
               <td className="small">Cleared ₹{money(data.totals.cleared)} · credit ₹{money(data.totals.left_as_credit)}</td></tr></tfoot>
           </table>)}
       </div>
@@ -157,7 +160,9 @@ function PaymentReport({ kind, onClose }) {
   );
 }
 
-export default function Parties({ can }) {
+export default function Parties({ can, me }) {
+  const ws = me?.store_kind === 'wholesale';
+  const [partyForm, setPartyForm] = useState(null);
   const [kind, setKind] = useState('customers');
   const [q, setQ] = useState('');
   const [dueOnly, setDueOnly] = useState(true);
@@ -167,6 +172,9 @@ export default function Parties({ can }) {
   const [pay, setPay] = useState(null);
   const [report, setReport] = useState(false);
   const [msg, setMsg] = useState('');
+  async function openParty(p) {
+    try { setPartyForm(await api(`/wholesale/parties/${p.id}`)); } catch (e) { setMsg(e.message); }
+  }
   const load = () => {
     api(`/${kind}${qs({ q: dq, has_due: dueOnly ? '1' : '', limit: 500 })}`).then(setData).catch(() => {});
     api(`/payments/${kind}${qs({ limit: 30, with_cleared: 1 })}`).then((d) => setPays(d.rows || [])).catch(() => setPays([]));
@@ -181,6 +189,7 @@ export default function Parties({ can }) {
           <button className={`chip ${kind === 'suppliers' ? 'on' : ''}`} onClick={() => setKind('suppliers')}>Suppliers</button>
           <label className="check"><input type="checkbox" checked={dueOnly} onChange={(e) => setDueOnly(e.target.checked)} /> Only with due</label>
           <button className="btn small" onClick={() => setReport(true)}>Payment report</button>
+          {ws && kind === 'customers' && <button className="btn small" onClick={() => setPartyForm({})}>+ New party</button>}
         </div>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name or phone" />
         {msg && <div className="okmsg">{msg}</div>}
@@ -192,20 +201,23 @@ export default function Parties({ can }) {
             <tbody>{(data?.rows || []).map((p) => (
               <tr key={p.id}><td>{p.name}</td><td>{p.phone}</td><td className="r">{Number(p.total_due) > 0 ? money(p.total_due) : ''}</td>
                 <td className="r">{Number(p.total_credit) > 0 ? money(p.total_credit) : ''}</td>
-                <td>{can('payments') && <button className="btn small" onClick={() => setPay(p)}>{kind === 'customers' ? 'Take payment' : 'Pay'}</button>}</td></tr>))}</tbody>
+                <td><div className="row">{can('payments') && <button className="btn small" onClick={() => setPay(p)}>{kind === 'customers' ? 'Take payment' : 'Pay'}</button>}
+                  {ws && kind === 'customers' && <button className="btn small" onClick={() => openParty(p)}>Party details</button>}</div></td></tr>))}</tbody>
           </table>
         </div>
         <div className="card detail">
           <h3>Recent {kind === 'customers' ? 'receipts' : 'payments'}</h3>
           <table className="grid compact">
             <tbody>{pays.map((p) => <tr key={p.id}><td>{fmtDate(p.payment_date)}</td>
-              <td>{p.customer_name || p.supplier_name}<Cleared p={p} /></td>
+              <td>{p.customer_name || p.supplier_name}{p.receipt_no ? <span className="tag">Rcpt {p.receipt_no}</span> : null}<Cleared p={p} /></td>
               <td className="r">{money(p.amount)}</td><td className="small muted">{p.payment_mode || p.mode}</td></tr>)}</tbody>
           </table>
         </div>
       </div>
       {pay && <PayForm kind={kind} party={pay} onClose={() => setPay(null)} onDone={(m) => { setPay(null); setMsg(m); load(); }} />}
       {report && <PaymentReport kind={kind} onClose={() => setReport(false)} />}
+      {partyForm && <PartyForm party={partyForm.id ? partyForm : null} onClose={() => setPartyForm(null)}
+        onSaved={(p) => { setPartyForm(null); setMsg(`Party ${p.name} saved.`); load(); }} />}
     </div>
   );
 }

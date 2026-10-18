@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { api, fmtDate, money, monthStartIso, qs, shortNo, todayIso } from '../api.js';
 import { BillPrint, PayDue, printNow, useDebounced } from './common.jsx';
 import DoctorMargin from './DoctorMargin.jsx';
+import { WholesaleInvoice } from './wholesale.jsx';
 
 function ReturnForm({ sale, onDone }) {
   const [data, setData] = useState(null);
@@ -10,10 +11,14 @@ function ReturnForm({ sale, onDone }) {
   const [settle, setSettle] = useState('ledger');
   const [error, setError] = useState('');
   useEffect(() => { api(`/sales/${sale.id}/returnable`).then(setData).catch((e) => setError(e.message)); }, [sale.id]);
+  // A wholesale bill is returned in strips (as the PC's Returns page counts it); the return is
+  // saved in stock units: strips x units per strip.
+  const upsOf = (mid) => (data?.wholesale ? Number(data.lines.find((l) => Number(l.medicine_id) === Number(mid))?.units_per_pack || 1) : 1);
+  const show = (units, mid) => Math.round((Number(units) / upsOf(mid)) * 100) / 100;
   async function save() {
     setError('');
     try {
-      const items = Object.entries(qty).filter(([, q]) => Number(q) > 0).map(([mid, q]) => ({ medicine_id: Number(mid), qty: Number(q) }));
+      const items = Object.entries(qty).filter(([, q]) => Number(q) > 0).map(([mid, q]) => ({ medicine_id: Number(mid), qty: Number(q) * upsOf(mid) }));
       const out = await api('/returns/sales', { method: 'POST', body: { sale_id: sale.id, items, settle_mode: settle } });
       onDone(`Return ${out.return_no} saved: refund ₹ ${money(out.refund_amount)}`);
     } catch (e) { setError(e.message); }
@@ -22,9 +27,9 @@ function ReturnForm({ sale, onDone }) {
   return (
     <div className="stack">
       <table className="grid">
-        <thead><tr><th>Medicine</th><th className="r">Sold</th><th className="r">Returned</th><th className="r">Return now</th></tr></thead>
+        <thead><tr><th>Medicine</th><th className="r">Sold</th><th className="r">Returned</th><th className="r">Return now{data.wholesale ? ' (strips)' : ''}</th></tr></thead>
         <tbody>{data.lines.map((l) => (
-          <tr key={l.medicine_id}><td>{l.name}</td><td className="r">{l.sold}</td><td className="r">{l.already_returned}</td>
+          <tr key={l.medicine_id}><td>{l.name}</td><td className="r">{show(l.sold, l.medicine_id)}</td><td className="r">{show(l.already_returned, l.medicine_id)}</td>
             <td className="r">{l.can_return > 0 ? <input className="num" value={qty[l.medicine_id] || ''} onChange={(e) => setQty({ ...qty, [l.medicine_id]: e.target.value })} /> : '—'}</td></tr>
         ))}</tbody>
       </table>
@@ -41,6 +46,7 @@ function ReturnForm({ sale, onDone }) {
 
 export default function SalesHistory({ me, can }) {
   const nav = useNavigate();
+  const ws = me.store_kind === 'wholesale';
   const [from, setFrom] = useState(monthStartIso());
   const [to, setTo] = useState(todayIso());
   const [q, setQ] = useState('');
@@ -76,7 +82,7 @@ export default function SalesHistory({ me, can }) {
           <label>From<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
           <label>To<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
           <label className="grow">Search<input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Bill no, customer, doctor" /></label>
-          <button className="btn" onClick={() => setDoctorReport(true)}>Export: Doctor margin report</button>
+          {!ws && <button className="btn" onClick={() => setDoctorReport(true)}>Export: Doctor margin report</button>}
         </div>
         {sum && <div className="tiles">
           <div><span>Bills</span><b>{sum.bills}</b></div>
@@ -111,7 +117,7 @@ export default function SalesHistory({ me, can }) {
         {open && (
           <div className="detail">
             <div className="card no-print row wrap">
-              <button className="btn" onClick={printNow}>Print</button>
+              {!ws && <button className="btn" onClick={printNow}>Print</button>}
               {can('sales_edit') && <button className="btn" onClick={() => nav(`/billing/edit/${open.id}`)}>Edit</button>}
               {can('returns') && <button className="btn" onClick={() => setMode(mode === 'return' ? 'view' : 'return')}>Return</button>}
               {can('payments') && Number(open.due_amount ?? open.total_due) > 0.009 && <button className="btn" onClick={() => setMode(mode === 'pay' ? 'view' : 'pay')}>Receive payment</button>}
@@ -124,7 +130,8 @@ export default function SalesHistory({ me, can }) {
                 ? <div className="card"><h3>Receive payment · {shortNo(open.bill_no)} · {open.customer_name}</h3>
                     <PayDue kind="sale" billId={open.id} onCancel={() => setMode('view')}
                       onDone={(m) => { setMsg(m); setMode('view'); load(); show(open.id); setMsg(m); }} /></div>
-                : <BillPrint sale={open} profile={me.profile} />}
+                : ws ? <div className="card"><WholesaleInvoice key={open.id} saleId={open.id} /></div>
+                  : <BillPrint sale={open} profile={me.profile} />}
           </div>
         )}
       </div>

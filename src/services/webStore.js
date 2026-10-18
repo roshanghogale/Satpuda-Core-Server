@@ -217,7 +217,8 @@ export async function purchasesList(storePk, opts) {
 }
 
 export async function purchaseDetail(storePk, id) {
-  const p = await admin.getPurchaseDetail(storePk, Number(id));
+  // Wholesale lines' Rate A / B / C (extra_fields) read as plain fields.
+  const p = withDocExtras(await admin.getPurchaseDetail(storePk, Number(id)));
   return { ...p, returns_in_bill: await returnsInBill(storePk, 'supplier', Number(id)) };
 }
 

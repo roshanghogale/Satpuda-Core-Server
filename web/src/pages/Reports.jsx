@@ -1,8 +1,14 @@
 import { useEffect, useState } from 'react';
 import { api, fmtDate, fmtExpiry, money, monthStartIso, qs, shortNo, todayIso } from '../api.js';
 import { printNow, useDebounced } from './common.jsx';
+import WholesaleReports from './WholesaleReports.jsx';
 
+/** The wholesale store reads its own reports (tax invoices: GST on top, no MRP). */
 export default function Reports({ me }) {
+  return me.store_kind === 'wholesale' ? <WholesaleReports me={me} /> : <RetailReports me={me} />;
+}
+
+function RetailReports({ me }) {
   const [from, setFrom] = useState(monthStartIso());
   const [to, setTo] = useState(todayIso());
   const [r, setR] = useState(null);

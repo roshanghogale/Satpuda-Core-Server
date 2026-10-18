@@ -3,10 +3,18 @@ import { NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom
 import { api, fmtDate, fmtExpiry, money, monthStartIso, qs, todayIso } from '../api.js';
 import { MedicineSearch, PartyPicker, PayDue, useDebounced } from './common.jsx';
 
-const EMPTY = { name: '', batch_no: '', expiry: '', type: 'Tablet', unit: '10', qty: '', free_qty: '', rate: '', mrp: '', gst_pct: '12', discount_pct: '', hsn_code: '', schedule: '', manufacturer: '' };
+const EMPTY = { name: '', batch_no: '', expiry: '', type: 'Tablet', unit: '10', qty: '', free_qty: '', rate: '', mrp: '', gst_pct: '12', discount_pct: '', hsn_code: '', schedule: '', manufacturer: '', rate_a: '', rate_b: '', rate_c: '' };
+const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+/** Wholesale: a line with a name and no Rate A above zero (owner, 18 Oct 2026: Rate A is required). */
+const needsRateA = (l) => Boolean(String(l.name || '').trim()) && !(Number(l.rate_a) > 0);
 const TYPES = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Ointment', 'Drops', 'Powder', 'Bolus', 'Tablet Pack', 'Other'];
 
-function PurchaseForm({ editId }) {
+/**
+ * A purchase. In the wholesale store (owner, 18 Oct 2026) a line keeps its purchase rate per
+ * strip and takes Rate A / B / C (per strip, GST excluded; Rate A required), which become the
+ * batch's sale rates; there is no MRP.
+ */
+function PurchaseForm({ editId, ws = false }) {
   const nav = useNavigate();
   const [supplier, setSupplier] = useState({ id: null, name: '' });
   const [billNo, setBillNo] = useState('');
@@ -45,11 +53,15 @@ function PurchaseForm({ editId }) {
       setCash(String(p.cash_paid_at_entry || '')); setOnline(String(p.online_paid_at_entry || '')); setVersion(p.version);
       setLines((p.items || []).map((it) => ({ medicine_id: it.medicine_id, name: it.name, batch_no: it.batch_no || '', expiry: fmtExpiry(it.expiry_date),
         type: it.type || '', unit: it.unit || '', qty: String(it.qty), free_qty: String(it.free_qty || ''), rate: String(it.rate), mrp: String(it.mrp),
-        gst_pct: String(it.gst_pct), discount_pct: String(it.discount_pct || ''), hsn_code: it.hsn_code || '', schedule: it.schedule || '', manufacturer: it.manufacturer || '' })));
+        gst_pct: String(it.gst_pct), discount_pct: String(it.discount_pct || ''), hsn_code: it.hsn_code || '', schedule: it.schedule || '', manufacturer: it.manufacturer || '',
+        rate_a: it.rate_a ? String(it.rate_a) : '', rate_b: it.rate_b ? String(it.rate_b) : '', rate_c: it.rate_c ? String(it.rate_c) : '' })));
     }).catch((e) => setError(e.message));
   }, [editId]);
 
-  const items = lines.filter((l) => l.name && (Number(l.qty) > 0 || Number(l.free_qty) > 0));
+  // Wholesale sends no MRP: the batch keeps the one it has.
+  const items = lines.filter((l) => l.name && (Number(l.qty) > 0 || Number(l.free_qty) > 0))
+    .map((l) => (ws ? (({ mrp, ...rest }) => rest)(l) : l));
+  const missingA = ws ? lines.filter((l) => l.name && (Number(l.qty) > 0 || Number(l.free_qty) > 0) && needsRateA(l)) : [];
   const body = { supplier_id: supplier.id, supplier_name: supplier.name, bill_number: billNo, purchase_date: date, gst_calc_method: method,
     overall_discount: Number(od) || 0, cash_paid: Number(cash) || 0, online_paid: Number(online) || 0, items };
   const pickedRets = openRets.filter((r) => useRets.includes(r.return_id));
@@ -67,7 +79,25 @@ function PurchaseForm({ editId }) {
   const setLine = (i, patch) => setLines((ls) => ls.map((l, j) => (j === i ? { ...l, ...patch } : l)));
   function pickExisting(i, m) {
     setLine(i, { medicine_id: m.id, name: m.name, batch_no: m.batch_no || '', expiry: fmtExpiry(m.expiry_date), type: m.type || '', unit: m.unit || '',
-      rate: String(m.rate ?? ''), mrp: String(m.mrp ?? ''), gst_pct: String(m.gst_percent ?? ''), hsn_code: m.hsn_code || '', schedule: m.schedule || '', manufacturer: m.manufacturer || '' });
+      rate: String(m.rate ?? ''), mrp: String(m.mrp ?? ''), gst_pct: String(m.gst_percent ?? ''), hsn_code: m.hsn_code || '', schedule: m.schedule || '', manufacturer: m.manufacturer || '',
+      // wholesale: the batch's last Rate A / B / C to start from
+      ...(ws ? { rate_a: m.rate_a ? String(m.rate_a) : '', rate_b: m.rate_b ? String(m.rate_b) : '', rate_c: m.rate_c ? String(m.rate_c) : '' } : {}) });
+  }
+  /** Every line without Rate A gets Rate A / B / C = its purchase rate + the shop's margins
+   *  (settings ws_margin_a/b/c, 8 / 10 / 12 %); a rate already typed is kept. */
+  async function fillFromMargins() {
+    try {
+      const m = await api('/wholesale/margins');
+      let filled = 0;
+      setLines((ls) => ls.map((l) => {
+        if (!needsRateA(l) || !(Number(l.rate) > 0)) return l;
+        filled += 1;
+        const pr = Number(l.rate);
+        const r = (pct) => String(r2(pr * (1 + pct / 100)));
+        return { ...l, rate_a: r(m.A), rate_b: Number(l.rate_b) > 0 ? l.rate_b : r(m.B), rate_c: Number(l.rate_c) > 0 ? l.rate_c : r(m.C) };
+      }));
+      setError(filled ? '' : 'No line without Rate A has a purchase rate to start from.');
+    } catch (e) { setError(e.message); }
   }
   async function save() {
     setBusy(true); setError('');
@@ -99,9 +129,11 @@ function PurchaseForm({ editId }) {
       </div>
       <div className="card scrollx">
         <table className="grid compact">
-          <thead><tr><th>Medicine (pick or type new)</th><th>Batch</th><th>Exp MM/YY</th><th>Type</th><th>Pack</th><th>Qty</th><th>Free</th><th>Rate</th><th>MRP</th><th>GST%</th><th>Disc%</th><th>Schedule</th><th className="r">Amount</th><th /></tr></thead>
+          <thead><tr><th>Medicine (pick or type new)</th><th>Batch</th><th>Exp MM/YY</th><th>Type</th><th>Pack</th><th>Qty</th><th>Free</th>
+            <th>{ws ? 'Purchase rate /strip' : 'Rate'}</th>{!ws && <th>MRP</th>}<th>GST%</th><th>Disc%</th>
+            {ws && <><th>Rate A*</th><th>Rate B</th><th>Rate C</th></>}<th>Schedule</th><th className="r">Amount</th><th /></tr></thead>
           <tbody>{lines.map((l, i) => (
-            <tr key={i}>
+            <tr key={i} className={ws && missingA.includes(l) ? 'ws-rate-missing' : ''}>
               <td className="wide-cell">
                 {l.medicine_id ? <span>{l.name} <button className="btn link small" onClick={() => setLine(i, { medicine_id: null })}>change</button></span>
                   : <><input value={l.name} onChange={(e) => setLine(i, { name: e.target.value })} placeholder="New medicine name" />
@@ -111,8 +143,9 @@ function PurchaseForm({ editId }) {
               <td><input className="num" value={l.expiry} onChange={(e) => setLine(i, { expiry: e.target.value })} placeholder="08/27" /></td>
               <td><select value={l.type} onChange={(e) => setLine(i, { type: e.target.value })}>{[...new Set([l.type, ...TYPES])].filter(Boolean).map((t) => <option key={t}>{t}</option>)}</select></td>
               <td><input className="num" value={l.unit} onChange={(e) => setLine(i, { unit: e.target.value })} title="Tablets per strip, or pack like 100ML" /></td>
-              {['qty', 'free_qty', 'rate', 'mrp', 'gst_pct', 'discount_pct'].map((f) => (
-                <td key={f}><input className="num" value={l[f]} onChange={(e) => setLine(i, { [f]: e.target.value })} /></td>
+              {['qty', 'free_qty', 'rate', ...(ws ? [] : ['mrp']), 'gst_pct', 'discount_pct', ...(ws ? ['rate_a', 'rate_b', 'rate_c'] : [])].map((f) => (
+                <td key={f}><input className="num" value={l[f]} onChange={(e) => setLine(i, { [f]: e.target.value })}
+                  title={f === 'rate_a' ? 'Rate A per strip, GST extra: required' : undefined} /></td>
               ))}
               <td><input className="num" value={l.schedule} onChange={(e) => setLine(i, { schedule: e.target.value.toUpperCase() })} placeholder="H/H1" /></td>
               <td className="r">{calc?.items?.[items.indexOf(l)] ? money(calc.items[items.indexOf(l)].item_amount) : ''}</td>
@@ -131,7 +164,12 @@ function PurchaseForm({ editId }) {
             ])}</tbody>
           </table>)}
         {openRets.length > 0 && !askRets && <button className="btn small" onClick={() => setAskRets(true)}>Returns to settle ({pickedRets.length}/{openRets.length})</button>}
-        <p className="muted small">Qty and Free are in strips/packs as on the supplier's bill. Strip medicines add qty × pack tablets to stock.</p>
+        {ws && <div className="row wrap">
+          <button className="btn small" onClick={fillFromMargins}>Fill Rate A/B/C from margins</button>
+          {missingA.length > 0 && <span className="neg small">{missingA.length} line{missingA.length === 1 ? ' needs' : 's need'} Rate A: {missingA.slice(0, 3).map((l) => l.name).join(', ')}{missingA.length > 3 ? ` and ${missingA.length - 3} more` : ''}. Rate A is required.</span>}
+        </div>}
+        <p className="muted small">Qty and Free are in strips/packs as on the supplier's bill. Strip medicines add qty × pack tablets to stock.
+          {ws ? ' Wholesale: rates are per strip, GST extra; Rate A / B / C become the batch\'s sale rates.' : ''}</p>
       </div>
       <div className="card totals">
         <div className="grid4">
@@ -168,14 +206,14 @@ function PurchaseForm({ editId }) {
           </div>)}
         <div className="row end">
           {editId && <button className="btn" onClick={() => nav('/purchases')}>Cancel</button>}
-          <button className="btn primary" disabled={busy || !calc} onClick={save}>{busy ? 'Saving…' : 'Save purchase'}</button>
+          <button className="btn primary" disabled={busy || !calc || missingA.length > 0} onClick={save}>{busy ? 'Saving…' : 'Save purchase'}</button>
         </div>
       </div>
     </div>
   );
 }
 
-function History({ can }) {
+function History({ can, ws = false }) {
   const nav = useNavigate();
   const [from, setFrom] = useState(monthStartIso());
   const [to, setTo] = useState(todayIso());
@@ -235,9 +273,12 @@ function History({ can }) {
             <PayDue kind="purchase" billId={open.id} onCancel={() => setPaying(false)}
               onDone={(m) => { setPaying(false); load(); show(open.id); setMsg(m); }} /></div>}
           <table className="grid compact">
-            <thead><tr><th>Medicine</th><th>Batch</th><th>Exp</th><th className="r">Qty</th><th className="r">Free</th><th className="r">Rate</th><th className="r">GST%</th><th className="r">Amount</th></tr></thead>
+            <thead><tr><th>Medicine</th><th>Batch</th><th>Exp</th><th className="r">Qty</th><th className="r">Free</th><th className="r">Rate</th>
+              {ws && <><th className="r">A</th><th className="r">B</th><th className="r">C</th></>}<th className="r">GST%</th><th className="r">Amount</th></tr></thead>
             <tbody>{(open.items || []).map((it, i) => <tr key={i}><td>{it.name}</td><td>{it.batch_no}</td><td>{fmtExpiry(it.expiry_date)}</td>
-              <td className="r">{it.qty}</td><td className="r">{it.free_qty || ''}</td><td className="r">{money(it.rate)}</td><td className="r">{it.gst_pct}</td><td className="r">{money(it.item_amount)}</td></tr>)}</tbody>
+              <td className="r">{it.qty}</td><td className="r">{it.free_qty || ''}</td><td className="r">{money(it.rate)}</td>
+              {ws && <><td className="r">{it.rate_a ? money(it.rate_a) : ''}</td><td className="r">{it.rate_b ? money(it.rate_b) : ''}</td><td className="r">{it.rate_c ? money(it.rate_c) : ''}</td></>}
+              <td className="r">{it.gst_pct}</td><td className="r">{money(it.item_amount)}</td></tr>)}</tbody>
           </table>
           <p>Taxable {money(open.subtotal)} · GST {money(open.total_gst)} · <b>Total ₹ {money(open.total_amount)}</b> · Paid {money(open.amount_paid)}</p>
         </div>}
@@ -246,12 +287,13 @@ function History({ can }) {
   );
 }
 
-function EditRoute() {
+function EditRoute({ ws }) {
   const { id } = useParams();
-  return <PurchaseForm editId={id} />;
+  return <PurchaseForm editId={id} ws={ws} />;
 }
 
-export default function Purchases({ can }) {
+export default function Purchases({ can, me }) {
+  const ws = me?.store_kind === 'wholesale';
   return (
     <div>
       <div className="subnav no-print">
@@ -259,9 +301,9 @@ export default function Purchases({ can }) {
         {can('purchase_view') && <NavLink to="/purchases" end>Purchase history</NavLink>}
       </div>
       <Routes>
-        <Route index element={can('purchase_view') ? <History can={can} /> : <PurchaseForm />} />
-        {can('purchase_entry') && <Route path="new" element={<PurchaseForm />} />}
-        {can('purchase_edit') && <Route path="edit/:id" element={<EditRoute />} />}
+        <Route index element={can('purchase_view') ? <History can={can} ws={ws} /> : <PurchaseForm ws={ws} />} />
+        {can('purchase_entry') && <Route path="new" element={<PurchaseForm ws={ws} />} />}
+        {can('purchase_edit') && <Route path="edit/:id" element={<EditRoute ws={ws} />} />}
       </Routes>
     </div>
   );
