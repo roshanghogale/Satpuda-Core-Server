@@ -215,7 +215,8 @@ router.post('/stores/:id/license', asyncHandler(async (req, res) => {
   }
   const { updateStoreLicenseRow } = await import('../services/licenseService.js');
   const { signLicense, sealAvailable } = await import('../services/licenseSeal.js');
-  const row = await updateStoreLicenseRow(store.id, patch);
+  // A linked wholesale store's licence follows its retail store: refused, with why.
+  const row = await updateStoreLicenseRow(store.id, patch, { follower: 'refuse' });
   const license = await licensePayloadWithLinks(row);
   ok(res, {
     license,

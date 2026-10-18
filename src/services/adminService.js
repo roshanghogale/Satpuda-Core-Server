@@ -1,6 +1,13 @@
-import { query } from '../db/pool.js';
+import { query, withTransaction } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
-import { parseVoiceTier, VOICE_TIERS } from './licenseService.js';
+import {
+  parseVoiceTier,
+  VOICE_TIERS,
+  LICENCE_FOLLOW_FIELDS,
+  followsRetail,
+  followRefusal,
+  mirrorLicenceToCompanions,
+} from './licenseService.js';
 import { ensureWholesaleCompanion, switchOffCompanion, storeKindOf } from './wholesaleStore.js';
 import {
   generateAndroidKey,
@@ -191,6 +198,11 @@ export async function createStore({ store_name, store_id, store_key, notes, app_
 
 export async function updateStore(idOrSlug, patch) {
   const store = await getStore(idOrSlug);
+  // A wholesale store linked to a retail one has no licence of its own: access,
+  // expiry and voice follow the retail store (same shop, same subscription).
+  if (followsRetail(store) && LICENCE_FOLLOW_FIELDS.some((k) => patch[k] !== undefined)) {
+    throw await followRefusal({ query }, store);
+  }
   const fields = [];
   const vals = [];
   let i = 1;
@@ -251,16 +263,21 @@ export async function updateStore(idOrSlug, patch) {
   if (!fields.length) return store;
   fields.push('updated_at = NOW()');
   vals.push(store.id);
-  const { rows } = await query(
-    `UPDATE stores SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
-    vals
-  );
-  const updated = rows[0];
+  // The store and its wholesale companion's copy of the licence, in one transaction.
+  const { updated, companions } = await withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE stores SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
+      vals
+    );
+    if (!rows[0]) throw new AppError(404, 'Store not found');
+    return { updated: rows[0], companions: await mirrorLicenceToCompanions(client, rows[0]) };
+  });
 
   // An admin changing expiry / is_active must take effect NOW, not in up to 45s.
   // requireAuth caches the store row, so without this the PC and Android keep
   // working until the cache lapses — and a live WebSocket never noticed at all.
   await applyLicenceChangeNow(updated);
+  for (const c of companions) await applyLicenceChangeNow(c);
 
   // Wholesale is a SEPARATE store linked to this one (WHOLESALE_DESIGN.md). ON
   // makes (or re-enables) the companion; OFF never deletes it, it only switches

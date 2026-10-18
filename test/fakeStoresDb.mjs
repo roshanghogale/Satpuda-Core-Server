@@ -59,10 +59,20 @@ export async function companionStatement(stores, sql, vals = [], side = {}) {
       .sort((a, b) => a.id - b.id)[0];
     return { rows: row ? [project(row, m[1])] : [] };
   }
-  if (/^SELECT \* FROM stores WHERE id = \$1 FOR UPDATE$/.test(sql)) {
+  if ((m = /^SELECT (.+) FROM stores WHERE id = \$1 FOR UPDATE$/.exec(sql))) {
     await tick();
     const row = stores.get(Number(vals[0]));
-    return { rows: row ? [{ ...row }] : [] };
+    return { rows: row ? [project(row, m[1])] : [] };
+  }
+  if (/^SELECT \* FROM stores WHERE parent_store_id = \$1 AND store_kind = 'wholesale' FOR UPDATE$/.test(sql)) {
+    const rows = [...stores.values()]
+      .filter((r) => r.parent_store_id === Number(vals[0]) && r.store_kind === 'wholesale')
+      .map((r) => ({ ...r }));
+    return { rows };
+  }
+  if (/^SELECT store_id, store_name FROM stores WHERE id = \$1$/.test(sql)) {
+    const row = stores.get(Number(vals[0]));
+    return { rows: row ? [{ store_id: row.store_id, store_name: row.store_name }] : [] };
   }
   if (/^SELECT \* FROM stores WHERE android_key = \$1$/.test(sql)) {
     const row = [...stores.values()].find((r) => r.android_key === vals[0]);

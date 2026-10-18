@@ -42,6 +42,7 @@ const eq = (a, b, what) => assert(a === b, `${what}: expected ${JSON.stringify(b
 
 // ─── fake stores table ────────────────────────────────────────────────────────
 const { pool } = await import('./src/db/pool.js');
+const { companionStatement, fakeConnect } = await import('./test/fakeStoresDb.mjs');
 
 /** Column defaults as the migrated schema has them. */
 const DEFAULTS = {
@@ -120,8 +121,13 @@ pool.query = async (text, vals = []) => {
     return { rows: [project(next, m[3])] };
   }
   if (/^(UPDATE|INSERT INTO) store_devices\b/.test(sql)) return { rows: [] };
+  // Licence writes now run in a transaction that also brings a wholesale companion
+  // level (none here); test/fakeStoresDb.mjs answers those statements.
+  const companion = await companionStatement(stores, sql, vals);
+  if (companion) return companion;
   throw new Error(`fake db: unexpected statement: ${sql.slice(0, 160)}`);
 };
+pool.connect = fakeConnect((text, vals) => pool.query(text, vals));
 
 // ─── the real routers on a local port ─────────────────────────────────────────
 const { default: authRoutes } = await import('./src/routes/auth.js');

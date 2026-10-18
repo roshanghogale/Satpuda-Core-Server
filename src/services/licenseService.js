@@ -1,4 +1,4 @@
-import { query } from '../db/pool.js';
+import { query, withTransaction } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
 
 /** Default online trial window after activation (IST calendar days).
@@ -185,7 +185,7 @@ export async function getStoreLicense(storePk) {
  * wrote -- not from a re-read a moment later, so that the record and the blob
  * the desktop stores can never describe two different licences.
  */
-export async function updateStoreLicenseRow(storePk, patch = {}) {
+export async function updateStoreLicenseRow(storePk, patch = {}, { follower = 'ignore' } = {}) {
   const fields = [];
   const vals = [];
   let i = 1;
@@ -244,22 +244,106 @@ export async function updateStoreLicenseRow(storePk, patch = {}) {
   }
   fields.push('updated_at = NOW()');
   vals.push(storePk);
-  const { rows } = await query(
+  // One transaction: the store's own licence and its wholesale companion's copy of
+  // it (same shop, same subscription) change together or not at all.
+  const { row, companions } = await withTransaction(async (client) => {
+    const { rows: cur } = await client.query(
+      `SELECT ${LICENSE_COLS} FROM stores WHERE id = $1 FOR UPDATE`, [storePk],
+    );
+    if (!cur[0]) throw new AppError(404, 'Store not found');
+    if (followsRetail(cur[0])) {
+      // A linked wholesale store has no licence of its own. A device on it that
+      // records an activation date must not start a 3-day expiry the retail store
+      // does not have, so device writes are dropped; an admin is told why.
+      if (follower === 'refuse') throw await followRefusal(client, cur[0]);
+      return { row: cur[0], companions: [] };
+    }
+    const { rows } = await client.query(
     `UPDATE stores SET ${fields.join(', ')} WHERE id = $${i} RETURNING
        id, store_id, store_key, store_name, is_active,
        activation_date, expiry_enabled, expiry_date, apply_expiry_check,
        provisioned_trial, voice_enabled, voice_tier, wholesale_enabled,
        store_kind, parent_store_id, updated_at`,
     vals
-  );
-  if (!rows[0]) throw new AppError(404, 'Store not found');
+    );
+    if (!rows[0]) throw new AppError(404, 'Store not found');
+    return { row: rows[0], companions: await mirrorLicenceToCompanions(client, rows[0]) };
+  });
   try {
     const { invalidateStoreAuthCache } = await import('../middleware/auth.js');
     invalidateStoreAuthCache(storePk);
   } catch {
     /* cache is optional */
   }
-  return rows[0];
+  if (companions.length) {
+    try {
+      const { applyLicenceChangeNow } = await import('./adminService.js');
+      for (const c of companions) await applyLicenceChangeNow(c);
+    } catch { /* best-effort */ }
+  }
+  return row;
+}
+
+/**
+ * The licence fields a wholesale companion takes from its retail store (owner, 18 Oct
+ * 2026: same shop, same subscription). Voice too: the same shop PC opens both stores,
+ * and voice must not come and go with the store it has open.
+ */
+export const LICENCE_FOLLOW_FIELDS = Object.freeze([
+  'is_active', 'activation_date', 'expiry_enabled', 'expiry_date', 'apply_expiry_check',
+  'voice_enabled', 'voice_tier',
+]);
+
+/** A wholesale store linked to a retail one: its licence follows the retail store. */
+export function followsRetail(store) {
+  return store?.store_kind === 'wholesale' && store?.parent_store_id != null;
+}
+
+/** The refusal an admin gets for editing a following store's licence. */
+export async function followRefusal(db, store) {
+  const { rows } = await db.query(
+    `SELECT store_id, store_name FROM stores WHERE id = $1`, [Number(store.parent_store_id)],
+  );
+  const parent = rows[0] || {};
+  return new AppError(
+    409,
+    `This wholesale store follows "${parent.store_name || 'its retail store'}": change access, `
+      + `expiry and voice on the retail store${parent.store_id ? ` (${parent.store_id})` : ''}.`,
+    { code: 'follows_retail', retail_store_id: parent.store_id || null },
+  );
+}
+
+function sameValue(a, b) {
+  const n = (v) => (v == null ? null : (v instanceof Date ? v.toISOString() : String(v)));
+  return n(a) === n(b);
+}
+
+/**
+ * Copy a retail store's licence fields onto its wholesale companion(s), inside the
+ * caller's transaction. `retail` is the retail row as just written (it must carry
+ * every LICENCE_FOLLOW_FIELDS column). Only companions that differ are written.
+ * Returns the companion rows it changed (the caller tells their devices).
+ */
+export async function mirrorLicenceToCompanions(client, retail) {
+  if (!retail?.id || retail.store_kind === 'wholesale') return [];
+  const { rows: comps } = await client.query(
+    `SELECT * FROM stores WHERE parent_store_id = $1 AND store_kind = 'wholesale' FOR UPDATE`,
+    [Number(retail.id)],
+  );
+  const changed = [];
+  for (const c of comps) {
+    const diff = LICENCE_FOLLOW_FIELDS.filter((k) => retail[k] !== undefined && !sameValue(c[k], retail[k]));
+    if (!diff.length) continue;
+    const sets = diff.map((k, n) => `${k} = $${n + 1}`);
+    const vals = diff.map((k) => retail[k] ?? null);
+    sets.push('updated_at = NOW()');
+    vals.push(c.id);
+    const { rows } = await client.query(
+      `UPDATE stores SET ${sets.join(', ')} WHERE id = $${vals.length} RETURNING *`, vals,
+    );
+    if (rows[0]) changed.push(rows[0]);
+  }
+  return changed;
 }
 
 export async function updateStoreLicense(storePk, patch = {}) {

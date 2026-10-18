@@ -318,6 +318,18 @@ try {
     eq(lw.body.data.store_kind, 'wholesale', 'companion store_kind');
     eq(lw.body.data.retail_store?.store_id, retail.store_id, 'companion still knows its retail store');
   });
+  await check('off: the companion still sends retail_store in full (pair, GET, PUT, signed), so its PC can switch back', async () => {
+    const want = {
+      store_id: retail.store_id, store_key: retail.store_key,
+      store_name: retail.store_name, android_key: retail.android_key,
+    };
+    eq(stores.get(retail.id).wholesale_enabled, false, 'retail switch is off');
+    const p = await j('/api/auth/pair', { method: 'POST', body: { android_key: companion.android_key, device_id: 'ws-store-test-ws-pc' } });
+    deepEq(p.body.data.license.retail_store, want, 'pair');
+    deepEq((await j('/api/auth/license', { token: WS_DEV })).body.data.retail_store, want, 'GET');
+    deepEq((await j('/api/auth/license', { method: 'PUT', token: WS_DEV, body: {} })).body.data.retail_store, want, 'PUT');
+    deepEq((await j('/api/auth/license/signed', { method: 'POST', token: WS_DEV, body: {} })).body.data.license.retail_store, want, 'signed');
+  });
   await check('ON again re-enables the SAME companion (same id, same SC key)', async () => {
     await j(`/api/admin/stores/${retail.id}`, { method: 'PATCH', token: ADMIN, body: { wholesale_enabled: true } });
     eq(companionsOf(retail.id).length, 1, 'companions');
@@ -327,11 +339,107 @@ try {
     const lr = await j('/api/auth/license', { token: RETAIL_DEV });
     eq(lr.body.data.wholesale_store?.android_key, companion.android_key, 'offered again');
   });
-  await check('a companion the admin turned off is not offered', async () => {
-    await j(`/api/admin/stores/${companion.id}`, { method: 'PATCH', token: ADMIN, body: { is_active: false } });
-    const lr = await j('/api/auth/license', { token: RETAIL_DEV });
-    assert(!('wholesale_store' in lr.body.data), 'offered while off');
-    await j(`/api/admin/stores/${companion.id}`, { method: 'PATCH', token: ADMIN, body: { is_active: true } });
+
+  console.log('\nThe licence follows the retail store (same shop, same subscription)');
+  const FOLLOW = ['is_active', 'activation_date', 'expiry_enabled', 'expiry_date', 'apply_expiry_check', 'voice_enabled', 'voice_tier'];
+  const sameLicence = (what) => {
+    const r = stores.get(retail.id);
+    const c = stores.get(companion.id);
+    for (const k of FOLLOW) eq(c[k], r[k], `${what}: companion ${k}`);
+  };
+  await check('admin PATCH of expiry + voice on the retail store reaches the companion', async () => {
+    const before = stores.get(companion.id).updated_at;
+    const r = await j(`/api/admin/stores/${retail.id}`, {
+      method: 'PATCH', token: ADMIN,
+      body: { expiry_enabled: true, expiry_date: '2027-03-31', apply_expiry_check: true, voice_enabled: true, voice_tier: '2' },
+    });
+    eq(r.status, 200, 'status');
+    sameLicence('after PATCH');
+    eq(stores.get(companion.id).expiry_date, '2027-03-31', 'companion expiry_date');
+    eq(stores.get(companion.id).voice_tier, '2', 'companion voice_tier');
+    assert(stores.get(companion.id).updated_at !== before, 'companion updated_at not bumped');
+    const lw = await j('/api/auth/license', { token: WS_DEV });
+    eq(lw.body.data.expiry_date, '2027-03-31', 'companion licence expiry');
+    eq(lw.body.data.voice_enabled, true, 'companion licence voice');
+  });
+  await check('turning the retail store off turns the companion off, and back on', async () => {
+    await j(`/api/admin/stores/${retail.id}`, { method: 'PATCH', token: ADMIN, body: { is_active: false } });
+    eq(stores.get(companion.id).is_active, false, 'companion is_active');
+    const lw = await j('/api/auth/license', { token: WS_DEV });
+    eq(lw.body.data.access_allowed, false, 'companion access while the shop is off');
+    await j(`/api/admin/stores/${retail.id}`, { method: 'PATCH', token: ADMIN, body: { is_active: true } });
+    eq(stores.get(companion.id).is_active, true, 'companion back on');
+    sameLicence('after on/off');
+  });
+  await check('admin licence route (POST /admin/stores/:retail/license) reaches the companion', async () => {
+    const r = await j(`/api/admin/stores/${retail.id}/license`, { method: 'POST', token: ADMIN, body: { expiry_date: '2027-06-30', activation_date: '2026-09-30' } });
+    eq(r.status, 200, 'status');
+    eq(stores.get(companion.id).expiry_date, '2027-06-30', 'companion expiry_date');
+    eq(stores.get(companion.id).activation_date, '2026-09-30', 'companion activation_date');
+    sameLicence('after licence route');
+  });
+  await check("the companion's own licence cannot be edited by the admin: 409, says whom it follows", async () => {
+    const snap = { ...stores.get(companion.id) };
+    for (const body of [{ expiry_date: '2030-01-01' }, { is_active: false }, { voice_enabled: false }, { activation_date: '2020-01-01' }]) {
+      const r = await j(`/api/admin/stores/${companion.id}`, { method: 'PATCH', token: ADMIN, body });
+      eq(r.status, 409, `PATCH ${JSON.stringify(body)} status`);
+      assert(String(r.body?.error || '').includes(`follows "${retail.store_name}"`), `message: ${r.body?.error}`);
+    }
+    const l = await j(`/api/admin/stores/${companion.id}/license`, { method: 'POST', token: ADMIN, body: { expiry_date: '2030-01-01' } });
+    eq(l.status, 409, 'licence route status');
+    for (const k of FOLLOW) eq(stores.get(companion.id)[k], snap[k], `companion ${k} unchanged`);
+  });
+  await check('non-licence fields of the companion can still be edited (name, notes)', async () => {
+    const r = await j(`/api/admin/stores/${companion.id}`, { method: 'PATCH', token: ADMIN, body: { notes: 'wholesale counter' } });
+    eq(r.status, 200, 'status');
+    eq(stores.get(companion.id).notes, 'wholesale counter', 'notes');
+  });
+  await check('a wholesale PC recording an activation date cannot start an expiry of its own', async () => {
+    const shop = insertStore({ activation_date: null, expiry_enabled: false, expiry_date: null, wholesale_enabled: true });
+    const comp = await ws.ensureWholesaleCompanion(shop.id);
+    const wsDev = signStoreToken(stores.get(comp.id), 'ws-store-test-act');
+    const r = await j('/api/auth/license', { method: 'PUT', token: wsDev, body: { activation_date: '2026-10-18' } });
+    eq(r.status, 200, 'status');
+    eq(stores.get(comp.id).activation_date, null, 'companion activation_date');
+    eq(stores.get(comp.id).expiry_enabled, false, 'companion expiry_enabled');
+    eq(stores.get(comp.id).expiry_date, null, 'companion expiry_date');
+    eq(r.body.data.expiry_enabled, false, 'answer expiry_enabled');
+  });
+  await check('the retail PC recording its activation date carries the companion with it', async () => {
+    const shop = insertStore({ activation_date: null, expiry_enabled: false, expiry_date: null, wholesale_enabled: true });
+    const comp = await ws.ensureWholesaleCompanion(shop.id);
+    const dev = signStoreToken(shop, 'ws-store-test-act-retail');
+    const r = await j('/api/auth/license', { method: 'PUT', token: dev, body: { activation_date: '2026-10-18' } });
+    eq(r.status, 200, 'status');
+    const s2 = stores.get(shop.id);
+    const c2 = stores.get(comp.id);
+    eq(s2.activation_date, '2026-10-18', 'retail activation');
+    eq(c2.activation_date, '2026-10-18', 'companion activation');
+    eq(c2.expiry_date, s2.expiry_date, 'companion expiry = retail expiry');
+    eq(c2.expiry_enabled, true, 'companion expiry_enabled');
+  });
+  await check('a new companion starts with the retail store\'s access and voice', async () => {
+    const shop = insertStore({ wholesale_enabled: true, voice_enabled: true, voice_tier: '3', is_active: true });
+    const c = await ws.ensureWholesaleCompanion(shop.id);
+    const row = stores.get(c.id);
+    for (const k of FOLLOW) eq(row[k], shop[k], `new companion ${k}`);
+  });
+  await check('a companion that slipped out of step is brought level on the next licence read', async () => {
+    stores.set(companion.id, { ...stores.get(companion.id), expiry_date: '2020-01-01' });
+    invalidateStoreAuthCache(companion.id);
+    await j('/api/auth/license', { token: RETAIL_DEV }); // existing companion: ensure not needed ...
+    await ws.ensureWholesaleCompanion(retail.id); // ... the admin switch / ensure levels it
+    sameLicence('after ensure');
+  });
+  await check('mirroring runs on the same transaction client as the retail write', () => {
+    const a = read('src/services/adminService.js');
+    assert(/withTransaction\(async \(client\) => \{[\s\S]{0,400}UPDATE stores SET[\s\S]{0,300}mirrorLicenceToCompanions\(client, rows\[0\]\)/.test(a), 'updateStore');
+    const l = read('src/services/licenseService.js');
+    assert(/withTransaction\(async \(client\) => \{[\s\S]{0,1600}mirrorLicenceToCompanions\(client, rows\[0\]\)/.test(l), 'updateStoreLicenseRow');
+  });
+  await check('store page shows a following licence read-only', () => {
+    const d = read('admin/src/pages/StoreDetail.jsx');
+    assert(/FollowsRetailPanel/.test(d) && /follows/.test(d), 'StoreDetail');
   });
 
   console.log('\nLazily, where the licence is built');

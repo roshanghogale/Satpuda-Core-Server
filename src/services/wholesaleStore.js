@@ -17,6 +17,12 @@
  * and makes the companion's own payload say `wholesale_enabled: false`. Its data
  * stays, and switching ON again offers the same store again.
  *
+ * The companion's licence is the retail store's (same shop, same subscription):
+ * is_active, activation/expiry and voice are copied on creation and every later
+ * change to the retail store is written to the companion in the same transaction
+ * (licenseService.mirrorLicenceToCompanions). The companion's own licence cannot be
+ * edited by the admin (refused, "follows <retail>") and device writes to it are dropped.
+ *
  * The companion row is made exactly like the admin panel's "create store"
  * (adminService.createStore): a `stores` row with a fresh SC- key from
  * `generateAndroidKey`, a `pharmacy_profiles` row (name, GST on) and a
@@ -26,7 +32,7 @@
 import { query, withTransaction } from '../db/pool.js';
 import { AppError } from '../utils/http.js';
 import { generateAndroidKey } from '../utils/fy.js';
-import { licensePayload } from './licenseService.js';
+import { licensePayload, mirrorLicenceToCompanions } from './licenseService.js';
 
 export const STORE_KINDS = Object.freeze(['retail', 'wholesale']);
 
@@ -141,7 +147,11 @@ export async function ensureWholesaleCompanion(retailStorePk) {
     const existing = await findCompanion(pk, client);
     if (parent.wholesale_enabled !== true) return { companion: existing, changed: false };
     if (existing) {
-      if (existing.wholesale_enabled === true) return { companion: existing, changed: false };
+      // Its licence follows the retail store; bring it level if anything slipped.
+      const mirrored = await mirrorLicenceToCompanions(client, parent);
+      if (existing.wholesale_enabled === true) {
+        return { companion: mirrored.length ? await findCompanion(pk, client) : existing, changed: mirrored.length > 0 };
+      }
       const { rows } = await client.query(
         `UPDATE stores SET wholesale_enabled = TRUE, updated_at = NOW()
           WHERE id = $1 RETURNING ${LINK_COLS}`,
@@ -176,9 +186,11 @@ export async function ensureWholesaleCompanion(retailStorePk) {
       `INSERT INTO stores (
          store_id, store_key, store_name, android_key, app_mode, device_role,
          is_active, activation_date, expiry_enabled, expiry_date, apply_expiry_check,
+         voice_enabled, voice_tier,
          provisioned_trial, wholesale_enabled, store_kind, parent_store_id, notes
        ) VALUES ($1,$2,$3,$4,$5,'pc',
-         TRUE, $6, $7, $8, $9,
+         $12, $6, $7, $8, $9,
+         $13, $14,
          FALSE, TRUE, 'wholesale', $10, $11)
        RETURNING ${LINK_COLS}`,
       [
@@ -192,7 +204,11 @@ export async function ensureWholesaleCompanion(retailStorePk) {
         parent.expiry_date || null,
         parent.apply_expiry_check !== false,
         pk,
-        `Wholesale store of ${parent.store_name} (${parent.store_id}). Its own data; never copied from the retail store.`,
+        `Wholesale store of ${parent.store_name} (${parent.store_id}). Its own data; never copied from the retail store. `
+          + 'Access, expiry and voice follow the retail store.',
+        parent.is_active !== false,
+        parent.voice_enabled === true,
+        parent.voice_tier || 'auto',
       ],
     );
     const companion = rows[0];

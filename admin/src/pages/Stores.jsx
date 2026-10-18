@@ -146,13 +146,18 @@ export default function Stores() {
                   <td className="right mono">{inr(s.today_sales)}</td>
                   <td className="right">{s.device_count}</td>
                   <td className="right" style={{ whiteSpace: 'nowrap' }}>
-                    <button
-                      className="btn sm"
-                      disabled={busy === s.id}
-                      onClick={() => setActive(s, !s.is_active)}
-                    >
-                      {busy === s.id ? '…' : (s.is_active ? 'Turn off' : 'Turn on')}
-                    </button>
+                    {s.store_kind === 'wholesale' && s.parent_store_id ? (
+                      // Its access follows the retail store; the server refuses it here.
+                      <span className="muted" style={{ fontSize: '0.75rem' }}>follows {s.parent_store_name || 'retail'}</span>
+                    ) : (
+                      <button
+                        className="btn sm"
+                        disabled={busy === s.id}
+                        onClick={() => setActive(s, !s.is_active)}
+                      >
+                        {busy === s.id ? '…' : (s.is_active ? 'Turn off' : 'Turn on')}
+                      </button>
+                    )}
                     {' '}
                     <Link className="btn sm" to={`/stores/${s.store_id}`}>Details</Link>
                   </td>

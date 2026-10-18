@@ -317,6 +317,43 @@ function WholesaleLinkPanel({ store, link }) {
   );
 }
 
+/**
+ * A wholesale store linked to a retail one has no licence of its own (same shop, same
+ * subscription): access, expiry and voice are the retail store's, shown read-only here.
+ * The server refuses to save them on this store.
+ */
+function FollowsRetailPanel({ store, retail }) {
+  const day = (v) => (v ? String(v).slice(0, 10) : '—');
+  const rows = [
+    ['Access', store.is_active ? 'On' : 'Off'],
+    ['Activated', day(store.activation_date)],
+    ['Expiry', store.expiry_enabled ? day(store.expiry_date) : 'no expiry'],
+    ['Expiry check', store.apply_expiry_check !== false ? 'applied' : 'not applied'],
+    ['Voice', store.voice_enabled ? `on, level ${normVoiceTier(store.voice_tier)}` : 'off'],
+  ];
+  return (
+    <div className="panel" style={{ padding: 16, marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+        <strong>Access &amp; license</strong>
+        <span className="badge">follows {retail.store_name}</span>
+      </div>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 24 }}>
+        {rows.map(([label, value]) => (
+          <div key={label}>
+            <div className="muted settings-field-label">{label}</div>
+            <div>{value}</div>
+          </div>
+        ))}
+      </div>
+      <div className="muted" style={{ fontSize: '0.78rem', marginTop: 8 }}>
+        Same shop, same subscription: these follow{' '}
+        <Link to={`/stores/${retail.store_id}`}>{retail.store_name}</Link>. Change access, expiry
+        and voice there; the wholesale store takes the same values at once.
+      </div>
+    </div>
+  );
+}
+
 function AccessControlPanel({ store, onSave }) {
   const [isActive, setIsActive] = useState(Boolean(store.is_active));
   const [applyExpiry, setApplyExpiry] = useState(store.apply_expiry_check !== false);
@@ -810,7 +847,11 @@ export default function StoreDetail() {
       </div>
 
       <WholesaleLinkPanel store={store} link={wsLink} />
-      <AccessControlPanel store={store} onSave={saveAccess} />
+      {store.store_kind === 'wholesale' && wsLink?.retail ? (
+        <FollowsRetailPanel store={store} retail={wsLink.retail} />
+      ) : (
+        <AccessControlPanel store={store} onSave={saveAccess} />
+      )}
       <SyncHealthPanel store={store} />
       <DeleteStorePanel store={store} />
 
