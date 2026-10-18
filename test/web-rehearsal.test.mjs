@@ -29,6 +29,17 @@ async function okCall(method, path, opts) {
   if (r.status !== 200) throw new Error(`${method} ${path} -> ${r.status} ${r.error}`);
   return r.data;
 }
+/** Every change after `after`, page by page: the test store's log outgrew one 1000-row page
+ *  (18 Oct 2026), and a single read missed this run's own payment. */
+async function allChanges(token, after = 0) {
+  const out = [];
+  for (;;) {
+    const page = await okCall('GET', `/api/sync/changes/full?after=${after}&limit=1000`, { token });
+    out.push(...(page.changes || []));
+    if (!page.has_more || !page.changes?.length) return out;
+    after = page.to_revision;
+  }
+}
 let passed = 0;
 function step(name) { passed += 1; console.log(`ok ${passed} - ${name}`); }
 
@@ -344,19 +355,19 @@ step('admin password reset signs the owner out everywhere');
 // ── sync: the web bills reach PCs and phones by the normal pull ──────────────
 const dev = await okCall('POST', '/api/auth/pair', { body: { android_key: 'SC-V2TEST01', device_id: `webtest-${tag}`, device_type: 'pc' } }).catch(() => null);
 if (dev?.token) {
-  const ch = await okCall('GET', '/api/sync/changes/full?after=0&limit=1000', { token: dev.token });
+  const ch = { changes: await allChanges(dev.token) };
   const cols = new Set((ch.changes || []).map((c) => c.collection));
   assert.ok(cols.has('sales') && cols.has('purchases') && cols.has('medicines'));
   step('a paired device pulls the web sales, purchases and medicines');
   // The bills a payment was given travel with it; an older app's edit (no allocations key)
   // keeps them.
-  const pulled = (ch.changes || []).find((c) => c.collection === 'customer_payments' && Number(c.local_id) === Number(chosen.id))?.doc;
+  const pulled = (ch.changes || []).findLast((c) => c.collection === 'customer_payments' && Number(c.local_id) === Number(chosen.id))?.doc;
   assert.deepEqual((pulled?.allocations || []).map((a) => a.bill_id), [b2.id], JSON.stringify(pulled));
   const oldApp = { ...pulled, note: 'edited on an older app', version: Number(pulled.version) + 1, updated_at: new Date().toISOString() };
   delete oldApp.allocations;
   await okCall('POST', '/api/sync/bundle', { token: dev.token, body: { customer_payments: [oldApp] } });
-  const ch2 = await okCall('GET', '/api/sync/changes/full?after=0&limit=5000', { token: dev.token });
-  const kept = (ch2.changes || []).find((c) => c.collection === 'customer_payments' && Number(c.local_id) === Number(chosen.id))?.doc;
+  const ch2 = { changes: await allChanges(dev.token) };
+  const kept = (ch2.changes || []).findLast((c) => c.collection === 'customer_payments' && Number(c.local_id) === Number(chosen.id))?.doc;
   assert.equal(kept?.note, 'edited on an older app');
   assert.deepEqual((kept?.allocations || []).map((a) => a.bill_id), [b2.id]);
   step('the bills a payment was given reach devices, and an older app editing it keeps them');
