@@ -22,6 +22,8 @@ import { partyBillClearing } from './partyDueCascade.js';
 import { cleanAllocations } from './billClearing.js';
 import { doctorMargin, NO_DOCTOR } from './doctorMargin.js';
 import { displayPurchaseNo, displaySalesBillNo } from '../utils/fy.js';
+import { withDocExtras } from './docExtras.js';
+import { WHOLESALE, lineRates, unitsPerPack } from './wholesaleSale.js';
 
 const r2 = (x) => pyRound(x, 2);
 
@@ -34,7 +36,7 @@ function installIdFor(storePk) {
   return `web-store-${storePk}`;
 }
 
-function cleanText(v, max = 120) {
+export function cleanText(v, max = 120) {
   const s = String(v ?? '').replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
   return s ? s.slice(0, max) : '';
 }
@@ -55,7 +57,7 @@ export function parseExpiry(v) {
   throw new AppError(400, `Expiry "${s}" is not a date. Write it as MM/YY, e.g. 08/27.`);
 }
 
-function isExpiredOn(expiry, onDate) {
+export function isExpiredOn(expiry, onDate) {
   if (!expiry) return false;
   const d = new Date(`${String(expiry).slice(0, 10)}T00:00:00Z`);
   if (Number.isNaN(d.getTime())) return false;
@@ -64,7 +66,7 @@ function isExpiredOn(expiry, onDate) {
   return cutoff.toISOString().slice(0, 10) < onDate;
 }
 
-async function save(storePk, user, build, auditEntry) {
+export async function save(storePk, user, build, auditEntry) {
   const out = await applyServerSideSave(storePk, {
     installId: installIdFor(storePk),
     deviceType: 'web',
@@ -117,7 +119,9 @@ export async function searchAnyMedicine(storePk, q) {
   if (!term) return [];
   const { rows } = await query(
     `SELECT local_id AS id, name, type, unit, batch_no, expiry_date, stock_qty, mrp, rate, gst_percent,
-            schedule, hsn_code, manufacturer, content_drug, is_hidden
+            schedule, hsn_code, manufacturer, content_drug, is_hidden,
+            (extra_fields->>'purchase_rate')::float AS purchase_rate, (extra_fields->>'rate_a')::float AS rate_a,
+            (extra_fields->>'rate_b')::float AS rate_b, (extra_fields->>'rate_c')::float AS rate_c
        FROM medicines WHERE store_pk=$1 AND NOT deleted AND name ILIKE $2
       ORDER BY (name ILIKE $3) DESC, name, expiry_date DESC NULLS LAST LIMIT 40`,
     [storePk, `%${term}%`, `${term}%`],
@@ -175,7 +179,7 @@ export async function suppliers(storePk, opts) {
 }
 
 /** Who made each bill on the web (web_audit); a PC or phone bill shows its device. */
-async function madeBy(storePk, collection, ids) {
+export async function madeBy(storePk, collection, ids) {
   if (!ids.length) return new Map();
   const { rows } = await query(
     `SELECT DISTINCT ON (local_id) local_id, username FROM web_audit
@@ -194,7 +198,8 @@ export async function salesList(storePk, opts) {
 }
 
 export async function saleDetail(storePk, id) {
-  const sale = await admin.getSaleDetail(storePk, Number(id));
+  // The wholesale invoice fields (extra_fields) read as plain fields, on the bill and its lines.
+  const sale = withDocExtras(await admin.getSaleDetail(storePk, Number(id)));
   const by = await madeBy(storePk, 'sales', [Number(id)]);
   const hist = await query(
     `SELECT username, action, created_at FROM web_audit WHERE store_pk=$1 AND collection='sales' AND local_id=$2
@@ -294,7 +299,7 @@ export async function openReturns(storePk, kind, partyId) {
     return {
       return_id: o.id, return_no: d.return_no, return_date: String(d.return_date).slice(0, 10),
       bill_no: showNo(kind, kind === 'customer' ? d.bill_no : d.purchase_no), amount: r2(d.refund_amount), left,
-      items: (d.items || []).map((it) => ({ name: it.name, qty: Number(it.qty), amount: r2(it.amount) })),
+      items: (d.items || []).map((it) => ({ medicine_id: Number(it.medicine_id) || null, name: it.name, qty: Number(it.qty), amount: r2(it.amount) })),
     };
   }).filter(Boolean)
     .sort((a, b) => (a.return_date < b.return_date ? -1 : a.return_date > b.return_date ? 1 : a.return_id - b.return_id));
@@ -304,7 +309,7 @@ export async function openReturns(storePk, kind, partyId) {
  * The returns a new bill settles: each gives what it has left, never more than the bill
  * leaves unpaid. Gives the return documents with this bill added to their allocations.
  */
-async function returnsForBill(storePk, kind, partyId, wanted, billId, billNo, unpaid) {
+export async function returnsForBill(storePk, kind, partyId, wanted, billId, billNo, unpaid) {
   const ids = [...new Set((Array.isArray(wanted) ? wanted : []).map((x) => Number(x?.return_id ?? x)).filter((v) => v > 0))];
   if (!ids.length) return { list: [], total: 0 };
   const open = new Map((await openReturns(storePk, kind, partyId)).map((r) => [r.return_id, r]));
@@ -353,7 +358,7 @@ export async function returnsInBill(storePk, kind, billId) {
     amount: r2(cleanAllocations(d.allocations).filter((a) => a.bill_id === Number(billId)).reduce((x, a) => x + a.amount, 0)),
     items: (d.items || []).map((it) => {
       const m = meds.get(Number(it.medicine_id)) || {};
-      return { name: it.name, batch_no: it.batch_no || m.batch_no || '', expiry: m.expiry || '', mrp: r2(m.mrp || 0),
+      return { medicine_id: Number(it.medicine_id) || null, name: it.name, batch_no: it.batch_no || m.batch_no || '', expiry: m.expiry || '', mrp: r2(m.mrp || 0),
         qty: Number(it.qty), rate: Number(it.rate), amount: r2(it.amount) };
     }),
   })).sort((a, b) => (a.return_date < b.return_date ? -1 : a.return_date > b.return_date ? 1 : a.return_id - b.return_id));
@@ -501,7 +506,7 @@ export async function scheduleRegister(storePk, { from, to, schedule } = {}) {
 
 // ─── Parties ──────────────────────────────────────────────────────────────────
 
-async function partyRow(client, table, storePk, id) {
+export async function partyRow(client, table, storePk, id) {
   const { rows } = await client.query(
     `SELECT * FROM ${table} WHERE store_pk=$1 AND local_id=$2 AND NOT deleted`, [storePk, Number(id)],
   );
@@ -572,7 +577,7 @@ async function resolveSupplier(client, storePk, { supplier_id, supplier_name, su
 
 // ─── Sales ────────────────────────────────────────────────────────────────────
 
-async function medicinesById(client, storePk, ids) {
+export async function medicinesById(client, storePk, ids) {
   const { rows } = await client.query(
     `SELECT * FROM medicines WHERE store_pk=$1 AND local_id = ANY($2::bigint[])`,
     [storePk, [...new Set(ids.map(Number))]],
@@ -641,6 +646,9 @@ function scheduleChecks(lines, customerName, doctorName) {
 export async function previewSale(storePk, body) {
   // An edit (sale_id) may keep what the bill already took off the shelf.
   const old = Number(body.sale_id) > 0 ? await currentDoc(storePk, 'sales', body.sale_id) : null;
+  if (old && String(old.invoice_mode || '').toLowerCase() === WHOLESALE) {
+    throw new AppError(409, 'This is a wholesale tax invoice: edit it on the Wholesale bill screen.', { code: 'wholesale_bill' });
+  }
   const oldQty = old ? qtyByMedicine(old.items) : new Map();
   const meds = await medicinesById({ query: (t, p) => query(t, p) }, storePk,
     [...(body.items || []).map((i) => i.medicine_id), ...oldQty.keys()]);
@@ -709,13 +717,13 @@ export async function createSale(storePk, user, body) {
   return { ...made, sale: await saleDetail(storePk, made.id) };
 }
 
-async function currentDoc(storePk, collection, id) {
+export async function currentDoc(storePk, collection, id) {
   const [doc] = await fetchDocsByLocalIds(storePk, collection, [Number(id)]);
   if (!doc || doc.deleted) throw new AppError(404, 'Not found (it may have been deleted on another device).');
   return doc;
 }
 
-function qtyByMedicine(items, unitsOf = (it) => Number(it.qty || 0)) {
+export function qtyByMedicine(items, unitsOf = (it) => Number(it.qty || 0)) {
   const m = new Map();
   for (const it of items || []) {
     const mid = Number(it.medicine_id);
@@ -727,6 +735,9 @@ function qtyByMedicine(items, unitsOf = (it) => Number(it.qty || 0)) {
 
 export async function editSale(storePk, user, id, body) {
   const old = await currentDoc(storePk, 'sales', id);
+  if (String(old.invoice_mode || '').toLowerCase() === WHOLESALE) {
+    throw new AppError(409, 'This is a wholesale tax invoice: edit it on the Wholesale bill screen.', { code: 'wholesale_bill' });
+  }
   if (body.version != null && Number(body.version) !== Number(old.version)) {
     throw new AppError(409, 'This bill was changed on another device since you opened it. Open it again.');
   }
@@ -792,6 +803,12 @@ export async function deleteSale(storePk, user, id) {
 /** What can still be returned of a bill: sold minus every earlier return, per medicine. */
 export async function returnable(storePk, saleId) {
   const sale = await currentDoc(storePk, 'sales', saleId);
+  // A wholesale bill is returned in strips (packs), as the PC's Returns page counts it: each
+  // line says how many stock units one pack is; the return itself is saved in units.
+  const wholesale = String(sale.invoice_mode || '').toLowerCase() === WHOLESALE;
+  const meds = wholesale
+    ? await medicinesById({ query: (t, p) => query(t, p) }, storePk, (sale.items || []).map((it) => it.medicine_id))
+    : new Map();
   const { rows } = await query(
     `SELECT sri.medicine_id, SUM(sri.qty)::float AS q
        FROM sales_returns sr JOIN sales_return_items sri ON sri.return_id=sr.id
@@ -804,9 +821,11 @@ export async function returnable(storePk, saleId) {
     const sold = Number(it.qty || 0);
     const already = Math.min(sold, back.get(mid) || 0);
     back.set(mid, (back.get(mid) || 0) - already);
-    return { ...it, sold, already_returned: already, can_return: Math.max(0, sold - already) };
+    const m = meds.get(mid);
+    return { ...it, sold, already_returned: already, can_return: Math.max(0, sold - already),
+      units_per_pack: wholesale ? unitsPerPack(m?.type ?? it.type, m?.unit) : 1 };
   });
-  return { sale, lines };
+  return { sale, lines, wholesale };
 }
 
 export async function createSalesReturn(storePk, user, body) {
@@ -874,10 +893,11 @@ const DESCRIPTIVE = ['type', 'hsn_code', 'schedule', 'manufacturer', 'content_dr
  * batch already on file, or a new row. The medicine row is written with the bill's price and
  * expiry; stock moves only through the purchase's stock operation.
  */
-async function purchaseLines(client, storePk, body, nextId, events) {
+async function purchaseLines(client, storePk, body, nextId, events, { wholesale = false } = {}) {
   const items = Array.isArray(body.items) ? body.items : [];
   if (!items.length) throw new AppError(400, 'Add at least one medicine.');
   if (items.length > 300) throw new AppError(400, 'A purchase can have at most 300 lines.');
+  if (wholesale) rateARequired(items);
   const out = [];
   const touched = new Map();
   for (const [i, it] of items.entries()) {
@@ -918,10 +938,16 @@ async function purchaseLines(client, storePk, body, nextId, events) {
       const v = cleanText(it[f], 120);
       if (v) doc[f] = f === 'schedule' ? v.toUpperCase() : v;
     }
+    // Wholesale: Rate A / B / C (per strip, GST excluded) go on the line and onto the batch,
+    // with its purchase rate (core/wholesale_rates.apply_purchase_rates): a rate not typed
+    // keeps what the batch had.
+    const rates = wholesale ? lineRates(it) : {};
+    if (wholesale) Object.assign(doc, rates, { purchase_rate: rate });
     delete doc.stock_qty; delete doc._pk;
     touched.set(id, doc);
     const units = purchaseStockUnits({ qty, free_qty: free }, doc);
     out.push({
+      ...(wholesale ? { rate_a: rates.rate_a ?? null, rate_b: rates.rate_b ?? null, rate_c: rates.rate_c ?? null } : {}),
       medicine_id: id, name, qty, free_qty: free, type: doc.type || '', hsn_code: doc.hsn_code || '',
       gst_pct: money(doc.gst_percent), mrp: money(doc.mrp), rate, manufacturer: doc.manufacturer || '',
       batch_no: batch, expiry_date: expiry || '', schedule: doc.schedule || '', discount_pct: money(it.discount_pct),
@@ -933,6 +959,19 @@ async function purchaseLines(client, storePk, body, nextId, events) {
     events.push({ op: 'upsert', collection: 'medicines', doc, base_version: Number(doc.version || 0) });
   }
   return out;
+}
+
+/** A wholesale purchase sells at Rate A / B / C, so every line needs Rate A (owner, 18 Oct
+ *  2026; core/wholesale_rates.rate_a_required_answer). Nothing is saved without it. */
+function rateARequired(items) {
+  const missing = items
+    .map((it, i) => ({ i, name: String(it?.name || '').trim() || `Line ${i + 1}` }))
+    .filter(({ i }) => !(lineRates(items[i]).rate_a > 0));
+  if (!missing.length) return;
+  const names = missing.map((x) => x.name);
+  const shown = names.slice(0, 3).join(', ') + (names.length > 3 ? ` and ${names.length - 3} more` : '');
+  throw new AppError(400, `${missing.length} line(s) need Rate A: ${shown}. Wholesale: Rate A is required for every medicine `
+    + '(per strip, GST extra). Nothing was saved.', { code: 'rate_a_required', missing_rows: missing.map((x) => x.i) });
 }
 
 async function fullMedicine(storePk, id) {
@@ -965,7 +1004,7 @@ function purchaseDoc(base, calc, lines) {
   };
 }
 
-export async function previewPurchase(storePk, body) {
+export async function previewPurchase(storePk, body, _opts = {}) {
   const lines = (body.items || []).map((it) => ({ qty: money(it.qty), free_qty: money(it.free_qty), rate: money(it.rate),
     gst_pct: money(it.gst_pct), discount_pct: money(it.discount_pct), mrp: money(it.mrp) }));
   let pd = 0; let pc = 0;
@@ -977,7 +1016,7 @@ export async function previewPurchase(storePk, body) {
     cash_paid: body.cash_paid, online_paid: body.online_paid, expenditure: body.expenditure, gst_calc_method: body.gst_calc_method });
 }
 
-export async function createPurchase(storePk, user, body) {
+export async function createPurchase(storePk, user, body, { wholesale = false } = {}) {
   const date = String(body.purchase_date || todayIst()).slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > todayIst()) throw new AppError(400, 'Purchase date cannot be in the future.');
   let made;
@@ -993,7 +1032,7 @@ export async function createPurchase(storePk, user, body) {
       );
       if (rows[0]) throw new AppError(409, `Supplier bill ${billNumber} is already entered (purchase ${rows[0].purchase_no}).`);
     }
-    const lines = await purchaseLines(client, storePk, body, nextId, events);
+    const lines = await purchaseLines(client, storePk, body, nextId, events, { wholesale });
     const calc = purchaseCalc({ items: lines.map((l) => ({ ...l })), overall_discount: body.overall_discount,
       previous_due: Number(sup.total_due || 0), previous_credit: Number(sup.total_credit || 0),
       cash_paid: body.cash_paid, online_paid: body.online_paid, expenditure: body.expenditure, gst_calc_method: body.gst_calc_method });
@@ -1025,7 +1064,7 @@ export async function createPurchase(storePk, user, body) {
   return { ...made, purchase: await purchaseDetail(storePk, made.id) };
 }
 
-export async function editPurchase(storePk, user, id, body) {
+export async function editPurchase(storePk, user, id, body, { wholesale = false } = {}) {
   const old = await currentDoc(storePk, 'purchases', id);
   if (body.version != null && Number(body.version) !== Number(old.version)) {
     throw new AppError(409, 'This purchase was changed on another device since you opened it. Open it again.');
@@ -1034,7 +1073,7 @@ export async function editPurchase(storePk, user, id, body) {
   await save(storePk, user, async (client, device, { nextId }) => {
     const events = [];
     const sup = await resolveSupplier(client, storePk, { supplier_id: body.supplier_id ?? old.supplier_id, supplier_name: body.supplier_name }, nextId, events);
-    const lines = await purchaseLines(client, storePk, body, nextId, events);
+    const lines = await purchaseLines(client, storePk, body, nextId, events, { wholesale });
     const same = Number(sup.local_id) === Number(old.supplier_id);
     const calc = purchaseCalc({ items: lines.map((l) => ({ ...l })), overall_discount: body.overall_discount,
       previous_due: same ? Number(old.previous_due || 0) : Number(sup.total_due || 0),
@@ -1077,6 +1116,13 @@ export async function deletePurchase(storePk, user, id) {
 }
 
 // ─── Payments ─────────────────────────────────────────────────────────────────
+
+/** The paper receipt's number (owner, 18 Oct 2026: payments collected at other shops get a
+ *  hand-written receipt), kept as receipt_no; no key at all when none was typed. */
+function receiptNo(body) {
+  const no = cleanText(body.receipt_no, 40);
+  return no ? { receipt_no: no } : {};
+}
 
 function payAmounts(body) {
   const amount = r2(money(body.amount));
@@ -1148,7 +1194,7 @@ export async function customerPayment(storePk, user, body) {
       id, local_id: id, customer_id: Number(cust.local_id), customer_name: cust.name, payment_date: todayIst(),
       amount, payment_mode: mode, cash_amount: mode === 'cash' ? amount : 0, online_amount: mode === 'online' ? amount : 0,
       reference_no: cleanText(body.reference, 40) || null, note: cleanText(body.note, 200) || null, allocations,
-      created_at: new Date().toISOString() } }];
+      ...receiptNo(body), created_at: new Date().toISOString() } }];
   }, () => ({ action: 'customer_payment.create', collection: 'customer_payments', localId: made.id,
     detail: { customer: made.customer, amount: made.amount, mode } }));
   return made;
@@ -1174,7 +1220,7 @@ export async function supplierPayment(storePk, user, body) {
       id, local_id: id, payment_no: payNo, supplier_id: Number(sup.local_id), supplier_name: sup.name,
       payment_date: todayIst(), amount, mode: mode === 'online' ? 'Online' : 'Cash',
       reference: cleanText(body.reference, 60) || null, due_before: before, due_after: r2(Math.max(0, before - amount)),
-      allocations, created_at: new Date().toISOString() } }];
+      allocations, ...receiptNo(body), created_at: new Date().toISOString() } }];
   }, () => ({ action: 'supplier_payment.create', collection: 'supplier_payments', localId: made.id, refNo: made.payment_no,
     detail: { supplier: made.supplier, amount: made.amount, mode } }));
   return made;
@@ -1183,7 +1229,8 @@ export async function supplierPayment(storePk, user, body) {
 // ─── Inventory edits ──────────────────────────────────────────────────────────
 
 const EDITABLE = ['name', 'type', 'unit', 'mrp', 'rate', 'gst_percent', 'batch_no', 'expiry_date', 'hsn_code',
-  'schedule', 'manufacturer', 'content_drug', 'location', 'is_hidden'];
+  'schedule', 'manufacturer', 'content_drug', 'location', 'is_hidden', 'rate_a', 'rate_b', 'rate_c'];
+const MONEY_FIELDS = ['mrp', 'rate', 'gst_percent', 'rate_a', 'rate_b', 'rate_c'];
 
 /**
  * Edit a medicine. Its descriptive fields flow into its old bill lines on the server
@@ -1202,7 +1249,7 @@ export async function editMedicine(storePk, user, id, body) {
     if (body[f] === undefined) continue;
     let v = body[f];
     if (f === 'expiry_date') v = parseExpiry(v);
-    else if (['mrp', 'rate', 'gst_percent'].includes(f)) v = money(v);
+    else if (MONEY_FIELDS.includes(f)) v = money(v);
     else if (f === 'is_hidden') v = !!v;
     else v = cleanText(v, 120);
     if (f === 'name') { v = String(v).toUpperCase(); if (!v) throw new AppError(400, 'Name cannot be empty.'); }

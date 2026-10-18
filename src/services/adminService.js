@@ -1181,6 +1181,7 @@ export async function listCustomerPayments(storePk, {
   if (textOrNull(q)) {
     where = pushLike(params, where, String(q).trim(), [
       "COALESCE(customer_name,'')", "COALESCE(reference_no,'')", "COALESCE(note,'')",
+      "COALESCE(extra_fields->>'receipt_no','')",
     ]);
   }
   const lim = Math.min(Number(limit) || 200, 5000);
@@ -1189,7 +1190,7 @@ export async function listCustomerPayments(storePk, {
   params.push(off);
   const { rows } = await query(
     `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
-            cash_amount, online_amount, reference_no, note, created_at
+            cash_amount, online_amount, reference_no, note, created_at, extra_fields->>'receipt_no' AS receipt_no
      FROM customer_payments WHERE ${where}
      ORDER BY ${orderBy(PAYMENT_SORTS, sort, 'date_desc')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
@@ -1231,6 +1232,7 @@ export async function listSupplierPayments(storePk, {
   if (textOrNull(q)) {
     where = pushLike(params, where, String(q).trim(), [
       'payment_no', "COALESCE(supplier_name,'')", "COALESCE(reference,'')",
+      "COALESCE(extra_fields->>'receipt_no','')",
     ]);
   }
   const lim = Math.min(Number(limit) || 200, 5000);
@@ -1239,7 +1241,7 @@ export async function listSupplierPayments(storePk, {
   params.push(off);
   const { rows } = await query(
     `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
-            reference, due_before, due_after, created_at
+            reference, due_before, due_after, created_at, extra_fields->>'receipt_no' AS receipt_no
      FROM supplier_payments WHERE ${where}
      ORDER BY ${orderBy(PAYMENT_SORTS, sort, 'date_desc')}
      LIMIT $${params.length - 1} OFFSET $${params.length}`,
