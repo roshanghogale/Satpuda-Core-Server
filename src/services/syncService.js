@@ -32,6 +32,7 @@ import {
   newSyncHint,
 } from './syncRevision.js';
 import { cleanAllocations } from './billClearing.js';
+import { docExtrasJson, mergeDocExtras, withDocExtrasAll } from './docExtras.js';
 import { broadcastSyncHint } from '../ws/syncHub.js';
 import { PROPAGATED_FIELDS, changedFields, propagateMedicineLines, propagationNote } from './medicineLines.js';
 import {
@@ -194,16 +195,18 @@ async function multiInsert(client, table, columns, rows, { batchSize = 200 } = {
 }
 
 /** Multi-row UPSERT for flat (store_pk, local_id) tables. */
-async function multiUpsert(client, table, columns, updateCols, rows, { batchSize = 150, keepFilledCols = [] } = {}) {
+async function multiUpsert(client, table, columns, updateCols, rows, { batchSize = 150, keepFilledCols = [], mergeJsonCols = [] } = {}) {
   if (!rows?.length) return;
   const colSql = columns.join(', ');
   const width = columns.length;
   const keep = new Set(keepFilledCols);
-  const updates = updateCols.map((c) => (
-    keep.has(c)
-      ? `${c}=COALESCE(NULLIF(TRIM(EXCLUDED.${c}), ''), ${table}.${c})`
-      : `${c}=EXCLUDED.${c}`
-  )).join(', ');
+  // A jsonb column merged key by key (docExtras.js): keys the push did not carry stay.
+  const merge = new Set(mergeJsonCols);
+  const updates = updateCols.map((c) => {
+    if (keep.has(c)) return `${c}=COALESCE(NULLIF(TRIM(EXCLUDED.${c}), ''), ${table}.${c})`;
+    if (merge.has(c)) return `${c}=COALESCE(${table}.${c}, '{}'::jsonb) || COALESCE(EXCLUDED.${c}, '{}'::jsonb)`;
+    return `${c}=EXCLUDED.${c}`;
+  }).join(', ');
   for (let i = 0; i < rows.length; i += batchSize) {
     const slice = rows.slice(i, i + batchSize);
     const params = [];
@@ -282,6 +285,7 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null, part
         Number(doc.total_due || 0), Number(doc.total_credit || 0),
         createdAtOrNow(doc), parseTs(doc.last_updated),
         writeAt, meta.version, meta.device_id, meta.deleted, meta.sync_status,
+        docExtrasJson('customers', doc),
       ]);
     } else if (collection === 'suppliers') {
       rows.push([
@@ -332,11 +336,11 @@ async function pushFlatBulk(client, storePk, collection, docs, hint = null, part
     await multiUpsert(client, 'customers', [
       'store_pk', 'local_id', 'name', 'phone', 'address', 'document_name',
       'total_due', 'total_credit', 'created_at', 'last_updated',
-      'updated_at', 'version', 'device_id', 'deleted', 'sync_status',
+      'updated_at', 'version', 'device_id', 'deleted', 'sync_status', 'extra_fields',
     ], [
       'name', 'phone', 'address', 'document_name', 'total_due', 'total_credit', 'last_updated',
-      'updated_at', 'version', 'device_id', 'deleted', 'sync_status',
-    ], rows, { keepFilledCols: ['phone', 'address'] });
+      'updated_at', 'version', 'device_id', 'deleted', 'sync_status', 'extra_fields',
+    ], rows, { keepFilledCols: ['phone', 'address'], mergeJsonCols: ['extra_fields'] });
   } else if (collection === 'suppliers') {
     await multiUpsert(client, 'suppliers', [
       'store_pk', 'local_id', 'name', 'address', 'phone', 'gstin', 'dl_numbers',
@@ -486,6 +490,7 @@ async function upsertCustomer(client, storePk, doc, hint = null) {
       writeTimestamp(meta, prev), meta.version, meta.device_id, meta.deleted, meta.sync_status,
     ]
   );
+  await mergeDocExtras(client, 'customers', storePk, localId, doc);
   if (!meta.deleted) {
     await recomputePartyAfterPush(client, hint, storePk, 'customers', localId);
   }
@@ -659,6 +664,7 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
           clientUuid,
         ]
       );
+      await mergeDocExtras(client, 'medicines', storePk, localId, doc);
     }
     const applied = await applyEmbeddedStockOps(client, storePk, { ...doc, id: localId }, hint);
     await persistClientUuid(client, 'medicines', storePk, localId, clientUuid);
@@ -763,6 +769,7 @@ async function upsertMedicine(client, storePk, doc, hint = null) {
       clientUuid,
     ]
   );
+  await mergeDocExtras(client, 'medicines', storePk, localId, doc);
   return withLines(answer({ id: localId, status: 'upserted' }));
 }
 
@@ -891,6 +898,7 @@ async function upsertSale(client, storePk, doc, hint = null) {
   );
   const stored = result.rows[0];
   const salePk = stored.id;
+  await mergeDocExtras(client, 'sales', storePk, localId, doc);
   if (Array.isArray(doc.items)) {
     await client.query(`DELETE FROM sales_items WHERE sale_id = $1`, [salePk]);
     const items = doc.items;
@@ -900,6 +908,7 @@ async function upsertSale(client, storePk, doc, hint = null) {
       [
         'store_pk', 'sale_id', 'medicine_id', 'name', 'type', 'batch_no', 'expiry_date', 'hsn_code',
         'schedule', 'manufacturer', 'qty', 'rate', 'gst_percent', 'amount', 'item_discount', 'cost_price',
+        'extra_fields',
       ],
       items.map((it) => [
         storePk, salePk, it.medicine_id ?? null, it.name || null, it.type || null,
@@ -907,6 +916,7 @@ async function upsertSale(client, storePk, doc, hint = null) {
         it.schedule || null, it.manufacturer || null,
         Number(it.qty || 0), Number(it.rate || 0), it.gst_percent ?? null,
         Number(it.amount || 0), Number(it.item_discount || 0), Number(it.cost_price || 0),
+        docExtrasJson('sales_items', it),
       ])
     );
   }
@@ -1199,7 +1209,7 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
       [
         'store_pk', 'purchase_id', 'medicine_id', 'name', 'qty', 'free_qty', 'type', 'hsn_code', 'gst_pct',
         'mrp', 'rate', 'manufacturer', 'batch_no', 'expiry_date', 'schedule', 'discount_pct',
-        'taxable', 'gst_amt', 'item_amount', 'unit', 'tablets_per_stripe',
+        'taxable', 'gst_amt', 'item_amount', 'unit', 'tablets_per_stripe', 'extra_fields',
       ],
       incomingItems.map((it) => {
         const pack = purchaseItemPack(it, medUnit.get(Number(it.medicine_id)));
@@ -1213,6 +1223,7 @@ async function upsertPurchase(client, storePk, doc, hint = null) {
           Number(it.taxable || 0), Number(it.gst_amt ?? it.gst_value ?? 0),
           Number(it.item_amount ?? it.amount ?? 0),
           pack.unit, pack.tablets_per_stripe,
+          docExtrasJson('purchase_items', it),
         ];
       })
     );
@@ -1332,6 +1343,7 @@ async function upsertCustomerPayment(client, storePk, doc, hint = null) {
       ...allocationParams(doc),
     ]
   );
+  await mergeDocExtras(client, 'customer_payments', storePk, localId, doc);
   const customerId = Number(doc.customer_id);
   if (customerId > 0) {
     try {
@@ -1374,6 +1386,7 @@ async function upsertSupplierPayment(client, storePk, doc, hint = null) {
       ...allocationParams(doc),
     ]
   );
+  await mergeDocExtras(client, 'supplier_payments', storePk, localId, doc);
   const supplierId = Number(doc.supplier_id);
   if (supplierId > 0) {
     try {
@@ -2297,7 +2310,7 @@ async function attachSaleItems(rows) {
   const ids = rows.map((r) => r._pk);
   const { rows: items } = await query(
     `SELECT sale_id, medicine_id, name, type, batch_no, expiry_date, hsn_code, schedule,
-            manufacturer, qty, rate, gst_percent, amount, item_discount, cost_price
+            manufacturer, qty, rate, gst_percent, amount, item_discount, cost_price, extra_fields
      FROM sales_items WHERE sale_id = ANY($1::bigint[])`,
     [ids]
   );
@@ -2311,6 +2324,7 @@ async function attachSaleItems(rows) {
       qty: it.qty, rate: Number(it.rate), gst_percent: it.gst_percent,
       amount: Number(it.amount), item_discount: Number(it.item_discount),
       cost_price: Number(it.cost_price),
+      extra_fields: it.extra_fields ?? null,
     });
   }
   return rows.map(({ _pk, ...r }) => ({
@@ -2327,7 +2341,7 @@ async function attachPurchaseItems(rows) {
   const { rows: items } = await query(
     `SELECT purchase_id, store_pk, medicine_id, name, qty, free_qty, type, hsn_code, gst_pct, mrp,
             rate, manufacturer, batch_no, expiry_date, schedule, discount_pct, taxable, gst_amt,
-            item_amount, unit, tablets_per_stripe
+            item_amount, unit, tablets_per_stripe, extra_fields
      FROM purchase_items WHERE purchase_id = ANY($1::bigint[])`,
     [ids]
   );
@@ -2350,6 +2364,7 @@ async function attachPurchaseItems(rows) {
       unit: pack.unit,
       tablets_per_stripe: pack.tablets_per_stripe,
       quantity_value: pack.unit,
+      extra_fields: it.extra_fields ?? null,
     });
   }
   return rows.map(({ _pk, ...r }) => ({
@@ -2421,7 +2436,7 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
   switch (collection) {
     case 'customers':
       sql = `SELECT local_id AS id, name, phone, address, document_name, total_due, total_credit,
-                    created_at, last_updated, updated_at, version, device_id, deleted, sync_status
+                    created_at, last_updated, updated_at, version, device_id, deleted, sync_status, extra_fields
              FROM customers WHERE store_pk=$1${idFilter}${delClause}`;
       break;
     case 'suppliers':
@@ -2439,7 +2454,7 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
                     supplier_name,
                     is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
-                    client_uuid
+                    client_uuid, extra_fields
              FROM medicines WHERE store_pk=$1${idFilter}${delClause}`;
       break;
     case 'sales':
@@ -2448,7 +2463,7 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
                     due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
                     doctor_name, is_autosave, fy_start_year, fy_serial, customer_name, customer_phone,
                     customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status,
-                    client_uuid
+                    client_uuid, extra_fields
              FROM sales WHERE store_pk=$1${idFilter}${delClause}`;
       mapper = attachSaleItems;
       break;
@@ -2467,13 +2482,13 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
     case 'customer_payments':
       sql = `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
                     cash_amount, online_amount, reference_no, note, created_at,
-                    updated_at, version, device_id, deleted, sync_status, allocations
+                    updated_at, version, device_id, deleted, sync_status, allocations, extra_fields
              FROM customer_payments WHERE store_pk=$1${idFilter}${delClause}`;
       break;
     case 'supplier_payments':
       sql = `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
                     reference, due_before, due_after, created_at,
-                    updated_at, version, device_id, deleted, sync_status, allocations
+                    updated_at, version, device_id, deleted, sync_status, allocations, extra_fields
              FROM supplier_payments WHERE store_pk=$1${idFilter}${delClause}`;
       break;
     case 'sales_returns':
@@ -2543,7 +2558,7 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
   }
 
   const { rows } = await query(sql, [storePk, ids]);
-  return mapper(rows);
+  return withDocExtrasAll(await mapper(rows));
 }
 
 export async function pullCollection(
@@ -2609,7 +2624,7 @@ export async function pullCollection(
   switch (collection) {
     case 'customers':
       sql = `SELECT local_id AS id, name, phone, address, document_name, total_due, total_credit,
-                    created_at, last_updated, updated_at, version, device_id, deleted, sync_status
+                    created_at, last_updated, updated_at, version, device_id, deleted, sync_status, extra_fields
              FROM customers WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;
@@ -2630,7 +2645,7 @@ export async function pullCollection(
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
                     supplier_name,
                     is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
-                    client_uuid
+                    client_uuid, extra_fields
              FROM medicines WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;
@@ -2640,7 +2655,7 @@ export async function pullCollection(
                     due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
                     doctor_name, is_autosave, fy_start_year, fy_serial, customer_name, customer_phone,
                     customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status,
-                    client_uuid
+                    client_uuid, extra_fields
              FROM sales WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       mapper = attachSaleItems;
@@ -2661,14 +2676,14 @@ export async function pullCollection(
     case 'customer_payments':
       sql = `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
                     cash_amount, online_amount, reference_no, note, created_at,
-                    updated_at, version, device_id, deleted, sync_status, allocations
+                    updated_at, version, device_id, deleted, sync_status, allocations, extra_fields
              FROM customer_payments WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;
     case 'supplier_payments':
       sql = `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
                     reference, due_before, due_after, created_at,
-                    updated_at, version, device_id, deleted, sync_status, allocations
+                    updated_at, version, device_id, deleted, sync_status, allocations, extra_fields
              FROM supplier_payments WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;
@@ -2760,7 +2775,7 @@ export async function pullCollection(
         'ORDER BY updated_at ASC, local_id ASC LIMIT $4',
       );
     const { rows } = await query(sql, [storePk, cutoff, after, lim]);
-    return mapper(rows);
+    return withDocExtrasAll(await mapper(rows));
   }
 
   sql = sql.replace(
@@ -2768,7 +2783,7 @@ export async function pullCollection(
     'ORDER BY updated_at ASC, local_id ASC LIMIT $3',
   );
   const { rows } = await query(sql, [storePk, cutoff, lim]);
-  return mapper(rows);
+  return withDocExtrasAll(await mapper(rows));
 }
 
 /**
@@ -2824,7 +2839,7 @@ export async function pullDoc(storePk, collection, localId) {
                     due_amount, credit_amount, total_due, paid_due, bill_cleared, account_cleared,
                     doctor_name, is_autosave, fy_start_year, fy_serial, customer_name, customer_phone,
                     customer_address, item_count, created_at, updated_at, version, device_id, deleted, sync_status,
-                    client_uuid
+                    client_uuid, extra_fields
              FROM sales WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
       mapper = attachSaleItems;
       break;
@@ -2845,12 +2860,12 @@ export async function pullDoc(storePk, collection, localId) {
                     manufacturer, batch_no, expiry_date, hsn_code, schedule, location, content_drug,
                     supplier_name,
                     is_hidden, synced_at, created_at, updated_at, version, device_id, deleted, sync_status,
-                    client_uuid
+                    client_uuid, extra_fields
              FROM medicines WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
       break;
     case 'customers':
       sql = `SELECT local_id AS id, name, phone, address, document_name, total_due, total_credit,
-                    created_at, last_updated, updated_at, version, device_id, deleted, sync_status
+                    created_at, last_updated, updated_at, version, device_id, deleted, sync_status, extra_fields
              FROM customers WHERE store_pk=$1 AND local_id=$2 LIMIT 1`;
       break;
     case 'suppliers':
@@ -2875,7 +2890,7 @@ export async function pullDoc(storePk, collection, localId) {
 
   const { rows } = await query(sql, [storePk, lid]);
   if (!rows.length) throw new AppError(404, `${collection}/${lid} not found`);
-  const mapped = await mapper(rows);
+  const mapped = withDocExtrasAll(await mapper(rows));
   return Array.isArray(mapped) ? mapped[0] : mapped;
 }
 

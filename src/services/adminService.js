@@ -237,6 +237,14 @@ export async function updateStore(idOrSlug, patch) {
     fields.push(`voice_tier = $${i++}`);
     vals.push(tier);
   }
+  // Wholesale mode (beta) switch. Strict for the same reason as voice_enabled.
+  if (patch.wholesale_enabled !== undefined) {
+    if (typeof patch.wholesale_enabled !== 'boolean') {
+      throw new AppError(400, 'wholesale_enabled must be true or false');
+    }
+    fields.push(`wholesale_enabled = $${i++}`);
+    vals.push(patch.wholesale_enabled);
+  }
   if (!fields.length) return store;
   fields.push('updated_at = NOW()');
   vals.push(store.id);

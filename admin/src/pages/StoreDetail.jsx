@@ -287,12 +287,14 @@ function AccessControlPanel({ store, onSave }) {
   );
   const [voiceEnabled, setVoiceEnabled] = useState(store.voice_enabled === true);
   const [voiceTier, setVoiceTier] = useState(normVoiceTier(store.voice_tier));
+  const [wholesaleEnabled, setWholesaleEnabled] = useState(store.wholesale_enabled === true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
 
   useEffect(() => {
     setVoiceEnabled(store.voice_enabled === true);
     setVoiceTier(normVoiceTier(store.voice_tier));
+    setWholesaleEnabled(store.wholesale_enabled === true);
     setIsActive(Boolean(store.is_active));
     setApplyExpiry(store.apply_expiry_check !== false);
     setExpiryEnabled(Boolean(store.expiry_enabled));
@@ -313,6 +315,7 @@ function AccessControlPanel({ store, onSave }) {
         activation_date: activationDate || null,
         voice_enabled: voiceEnabled,
         voice_tier: voiceTier,
+        wholesale_enabled: wholesaleEnabled,
         provisioned_trial: isTrial,
       });
       setMsg('Access settings saved. Online devices use this immediately.');
@@ -443,10 +446,23 @@ function AccessControlPanel({ store, onSave }) {
             ))}
           </select>
         </div>
+        <div className="settings-field">
+          <div className="muted settings-field-label">Wholesale</div>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              checked={wholesaleEnabled}
+              onChange={(e) => setWholesaleEnabled(e.target.checked)}
+            />
+            Wholesale mode (beta)
+          </label>
+        </div>
       </div>
       <div className="muted" style={{ fontSize: '0.78rem', margin: '-4px 0 12px' }}>
         Off = the shop's app shows no voice button. Level caps what the shop PC runs
         (1 = wake word + your-voice check, 2 = + small local AI, 3 = + large AI and better hearing).
+        Wholesale mode (beta) lets the shop PC switch the store between retail and wholesale;
+        off = the store stays retail (its wholesale data is kept).
       </div>
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         <button className="btn sm" disabled={saving} onClick={save}>

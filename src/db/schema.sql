@@ -46,6 +46,12 @@ ALTER TABLE stores ADD COLUMN IF NOT EXISTS apply_expiry_check BOOLEAN NOT NULL 
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS voice_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE stores ADD COLUMN IF NOT EXISTS voice_tier TEXT NOT NULL DEFAULT 'auto';
 
+-- Wholesale mode (beta), per store, switched from the admin panel exactly like
+-- voice_enabled. OFF unless the owner turns it on; when ON the shop PC may flip
+-- the store between retail and wholesale (settings kv `business_mode`). Not part
+-- of the signed licence blob: a missing value anywhere on the desktop means OFF.
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS wholesale_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
 CREATE INDEX IF NOT EXISTS idx_stores_android_key ON stores(android_key) WHERE android_key IS NOT NULL;
 
 -- Self-service trial: this store was created by the installer through
@@ -888,3 +894,15 @@ ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS settle_mode TEXT;
 ALTER TABLE sales_returns ADD COLUMN IF NOT EXISTS allocations JSONB;
 ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS settle_mode TEXT;
 ALTER TABLE purchase_returns ADD COLUMN IF NOT EXISTS allocations JSONB;
+
+-- Wholesale mode (owner, 18 Oct 2026): the new fields the PC sends on these documents
+-- (party_type, rate_a/b/c, buyer_gstin, receipt_no, ...; list in src/services/docExtras.js)
+-- are kept here as one JSON object, merged on push and spread back onto the document on
+-- pull. NULL = none sent. Retail documents never write it.
+ALTER TABLE customers ADD COLUMN IF NOT EXISTS extra_fields JSONB;
+ALTER TABLE medicines ADD COLUMN IF NOT EXISTS extra_fields JSONB;
+ALTER TABLE sales ADD COLUMN IF NOT EXISTS extra_fields JSONB;
+ALTER TABLE sales_items ADD COLUMN IF NOT EXISTS extra_fields JSONB;
+ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS extra_fields JSONB;
+ALTER TABLE customer_payments ADD COLUMN IF NOT EXISTS extra_fields JSONB;
+ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS extra_fields JSONB;

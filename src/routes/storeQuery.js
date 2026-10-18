@@ -10,6 +10,7 @@ import * as summaries from '../services/storeSummaries.js';
 import { boolOrNull } from '../services/adminFilters.js';
 import { query } from '../db/pool.js';
 import { inventoryCounts } from '../services/webStore.js';
+import { withDocExtras } from '../services/docExtras.js';
 
 const router = Router();
 router.use(requireStore);
@@ -181,12 +182,13 @@ router.get('/payments/customers', asyncHandler(async (req, res) => {
   params.push(limit);
   const { rows } = await query(
     `SELECT local_id AS id, customer_id, customer_name, payment_date, amount, payment_mode,
-            cash_amount, online_amount, reference_no, note, created_at, allocations
+            cash_amount, online_amount, reference_no, note, created_at, allocations, extra_fields
      FROM customer_payments WHERE ${where}
      ORDER BY payment_date DESC, local_id DESC LIMIT $${params.length}`,
     params,
   );
-  ok(res, { rows, total: rows.length });
+  // receipt_no (wholesale beta) comes out of extra_fields as a plain field.
+  ok(res, { rows: rows.map(withDocExtras), total: rows.length });
 }));
 
 router.get('/payments/suppliers', asyncHandler(async (req, res) => {
@@ -205,12 +207,12 @@ router.get('/payments/suppliers', asyncHandler(async (req, res) => {
   params.push(limit);
   const { rows } = await query(
     `SELECT local_id AS id, payment_no, supplier_id, supplier_name, payment_date, amount, mode,
-            reference, due_before, due_after, created_at, allocations
+            reference, due_before, due_after, created_at, allocations, extra_fields
      FROM supplier_payments WHERE ${where}
      ORDER BY payment_date DESC, local_id DESC LIMIT $${params.length}`,
     params,
   );
-  ok(res, { rows, total: rows.length });
+  ok(res, { rows: rows.map(withDocExtras), total: rows.length });
 }));
 
 router.get('/returns/sales', asyncHandler(async (req, res) => {

@@ -89,6 +89,14 @@ export function voiceFields(store) {
   };
 }
 
+/**
+ * The wholesale mode (beta) switch as a device should read it. OFF unless the
+ * row says TRUE: a row from before the column existed, or a NULL, is OFF.
+ */
+export function wholesaleFields(store) {
+  return { wholesale_enabled: store?.wholesale_enabled === true };
+}
+
 export function licensePayload(store) {
   const activationDate = toDateOnly(store.activation_date);
   const expiryDate = toDateOnly(store.expiry_date);
@@ -120,6 +128,9 @@ export function licensePayload(store) {
     // signed blob: it is a feature toggle, not access, and old blobs must keep
     // verifying. A desktop that finds no field treats voice as OFF.
     ...voiceFields(store),
+    // Wholesale mode (beta) switch, admin panel only, same rules as voice: not
+    // signed, and a desktop that finds no field treats wholesale as OFF.
+    ...wholesaleFields(store),
   };
 }
 
@@ -141,7 +152,7 @@ export function evaluateAccess(store, today = null) {
 /** The columns a licence is decided from, plus the row version the seal signs. */
 const LICENSE_COLS = `id, store_id, store_key, store_name, is_active,
             activation_date, expiry_enabled, expiry_date, apply_expiry_check,
-            provisioned_trial, voice_enabled, voice_tier, updated_at`;
+            provisioned_trial, voice_enabled, voice_tier, wholesale_enabled, updated_at`;
 
 /**
  * The raw store row behind a licence.
@@ -232,7 +243,7 @@ export async function updateStoreLicenseRow(storePk, patch = {}) {
     `UPDATE stores SET ${fields.join(', ')} WHERE id = $${i} RETURNING
        id, store_id, store_key, store_name, is_active,
        activation_date, expiry_enabled, expiry_date, apply_expiry_check,
-       provisioned_trial, voice_enabled, voice_tier, updated_at`,
+       provisioned_trial, voice_enabled, voice_tier, wholesale_enabled, updated_at`,
     vals
   );
   if (!rows[0]) throw new AppError(404, 'Store not found');
