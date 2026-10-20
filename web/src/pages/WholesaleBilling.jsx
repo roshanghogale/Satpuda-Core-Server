@@ -83,7 +83,25 @@ export default function WholesaleBilling({ me, can }) {
   const [askRets, setAskRets] = useState(false);
 
   async function choose(p, { keepBill = false } = {}) {
-    if (!p) { setParty(null); return; }
+    if (!p) {
+      // The pick was cleared (the name was edited): empty each box that still holds what the
+      // pick filled in, so a new party saved from the boxes never carries another party's
+      // GSTIN / DL on a tax invoice; what the user typed stays. Lines at the old party's tier
+      // go back to Rate A (a rate typed by hand stays). Due, returns, terms follow `party`.
+      const old = party;
+      setParty(null);
+      if (!old) return;
+      const same = (a, b) => String(a || '').trim().toUpperCase() === String(b || '').trim().toUpperCase();
+      setPhone((v) => (same(v, old.phone) ? '' : v));
+      setAddress((v) => (same(v, old.address) ? '' : v));
+      setBuyerGstin((v) => (same(v, old.gstin) ? '' : v));
+      setBuyerDl((v) => (same(v, old.dl_numbers) ? '' : v));
+      if (old.rate_tier && old.rate_tier !== 'A') {
+        setLines((ls) => ls.map((l) => (l.rate_tier === old.rate_tier
+          ? { ...l, rate_tier: 'A', rate: Number(l.tier_rates?.A) > 0 ? String(l.tier_rates.A) : '' } : l)));
+      }
+      return;
+    }
     try {
       const full = await api(`/wholesale/parties/${p.id}`);
       setParty(full);
