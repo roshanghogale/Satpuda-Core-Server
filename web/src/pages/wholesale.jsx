@@ -74,8 +74,12 @@ export function WholesaleInvoice({ saleId, autoPrint = false, onPrinted }) {
   );
 }
 
-/** Type a party (medicals first); pick one from the list. */
-export function WsPartyPicker({ value, onPick, placeholder = "Type the medical's name", autoFocus }) {
+/**
+ * Type a party (medicals first); pick one from the list, or keep the typed name: a new party
+ * is made from the bill's boxes when the bill is saved (owner, 20 Oct 2026). `onType` gets
+ * the typed text.
+ */
+export function WsPartyPicker({ value, onPick, onType, placeholder = "Type the medical's name", autoFocus }) {
   const [text, setText] = useState(value?.name || '');
   const [open, setOpen] = useState(false);
   const [rows, setRows] = useState([]);
@@ -91,7 +95,7 @@ export function WsPartyPicker({ value, onPick, placeholder = "Type the medical's
     <div className="picker">
       <input value={text} placeholder={placeholder} autoFocus={autoFocus}
         onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
-        onChange={(e) => { setText(e.target.value); if (value?.id) onPick(null); }} />
+        onChange={(e) => { setText(e.target.value); onType?.(e.target.value); if (value?.id) onPick(null); }} />
       {open && rows.length > 0 && (
         <div className="dropdown">
           {rows.map((r) => (

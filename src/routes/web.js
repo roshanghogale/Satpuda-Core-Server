@@ -151,6 +151,10 @@ router.get('/customers', needAny('parties', 'billing', 'sales_edit'), asyncHandl
 router.get('/suppliers', needAny('parties', 'purchase_entry', 'purchase_edit'), asyncHandler(async (req, res) => {
   ok(res, await store.suppliers(req.web.storePk, req.query));
 }));
+// What a new bill starts with: default doctor + phone, doctors, villages (as the PC's Sales).
+router.get('/sales/defaults', needAny('billing', 'sales_edit'), asyncHandler(async (req, res) => {
+  ok(res, await store.salesDefaults(req.web.storePk));
+}));
 
 // ─── Sales ───────────────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api, fmtDate, money, qs, shortNo } from '../api.js';
+import { api, fmtDate, modeLabel, money, qs, shortNo } from '../api.js';
 import { PartyPicker, printNow, useDebounced } from './common.jsx';
 import { PartyForm } from './wholesale.jsx';
 
@@ -116,9 +116,10 @@ function PaymentReport({ kind, onClose }) {
     const head = ['Date', cust ? 'Reference' : 'Payment no', 'Receipt no', cust ? 'Customer' : 'Supplier', 'Mode', 'Amount', 'Bill', 'Bill date', 'Cleared', 'How'];
     const lines = [head];
     for (const p of data.rows) {
-      const base = [p.payment_date?.slice(0, 10), cust ? shortNo(p.reference_no || '') : p.payment_no, p.receipt_no || '', p.customer_name || p.supplier_name, p.payment_mode || p.mode, r2(p.amount)];
+      const base = [p.payment_date?.slice(0, 10), cust ? shortNo(p.reference_no || '') : p.payment_no, p.receipt_no || '', p.customer_name || p.supplier_name, modeLabel(p.payment_mode || p.mode), r2(p.amount)];
       if (!p.cleared.length) lines.push([...base, '', '', '', '']);
-      p.cleared.forEach((c, i) => lines.push([...(i ? ['', '', '', '', '', ''] : base), c.bill_no, c.bill_date, c.amount, c.how]));
+      p.cleared.forEach((c, i) => lines.push([...(i ? ['', '', '', '', '', ''] : base), c.bill_no, c.bill_date, c.amount,
+        c.how === 'chosen' ? 'Chosen bill' : 'Oldest bill first']));
       if (p.left_as_credit > 0.009) lines.push(['', '', '', '', '', '', 'Left as credit', '', p.left_as_credit, '']);
     }
     lines.push(['Total', '', '', '', '', data.totals.amount, '', '', data.totals.cleared, '']);
@@ -150,7 +151,7 @@ function PaymentReport({ kind, onClose }) {
               <th className="r">Amount</th><th>Bills cleared</th></tr></thead>
             <tbody>{data.rows.map((p) => (
               <tr key={p.id}><td>{fmtDate(p.payment_date)}</td><td>{cust ? shortNo(p.reference_no || '') : p.payment_no}</td><td>{p.receipt_no || ''}</td>
-                <td>{p.customer_name || p.supplier_name}</td><td className="small">{p.payment_mode || p.mode}</td>
+                <td>{p.customer_name || p.supplier_name}</td><td className="small">{modeLabel(p.payment_mode || p.mode)}</td>
                 <td className="r">{money(p.amount)}</td><td><Cleared p={p} /></td></tr>))}</tbody>
             <tfoot><tr><td colSpan={5}><b>{data.totals.count} payments</b></td><td className="r"><b>{money(data.totals.amount)}</b></td>
               <td className="small">Cleared ₹{money(data.totals.cleared)} · credit ₹{money(data.totals.left_as_credit)}</td></tr></tfoot>
@@ -210,7 +211,7 @@ export default function Parties({ can, me }) {
           <table className="grid compact">
             <tbody>{pays.map((p) => <tr key={p.id}><td>{fmtDate(p.payment_date)}</td>
               <td>{p.customer_name || p.supplier_name}{p.receipt_no ? <span className="tag">Rcpt {p.receipt_no}</span> : null}<Cleared p={p} /></td>
-              <td className="r">{money(p.amount)}</td><td className="small muted">{p.payment_mode || p.mode}</td></tr>)}</tbody>
+              <td className="r">{money(p.amount)}</td><td className="small muted">{modeLabel(p.payment_mode || p.mode)}</td></tr>)}</tbody>
           </table>
         </div>
       </div>

@@ -422,6 +422,45 @@ async function partyFor(client, storePk, id) {
   return p;
 }
 
+/**
+ * The party of a new bill (owner, 20 Oct 2026): the picked one; else the typed name, as a
+ * retail bill takes a new customer: a party of that name (any case) when there is one, or a
+ * new party made from the boxes on the screen (name, phone, address, GSTIN, DL numbers;
+ * Rate A; state from the GSTIN). Its events go into `events`, before the bill's.
+ */
+async function billParty(client, storePk, body, nextId, events) {
+  if (Number(body.customer_id) > 0) return { p: await partyFor(client, storePk, body.customer_id), made: false };
+  const name = cleanText(body.customer_name, 80).toUpperCase();
+  if (!name || COUNTER_SALE_NAMES.includes(name)) {
+    throw new AppError(400, 'Enter the party name: pick a party, or type a new one.', { code: 'party_required' });
+  }
+  const { rows } = await client.query(
+    `SELECT local_id FROM customers WHERE store_pk=$1 AND NOT deleted AND UPPER(BTRIM(name))=$2 ORDER BY local_id LIMIT 1`,
+    [storePk, name],
+  );
+  if (rows[0]) return { p: await partyFor(client, storePk, rows[0].local_id), made: false };
+  let party;
+  try {
+    party = W.cleanParty({ party_type: 'medical', rate_tier: 'A', dl_numbers: body.buyer_dl || '', gstin: body.buyer_gstin || '' });
+  } catch (err) {
+    throw new AppError(400, err.message);
+  }
+  const cid = await nextId('customers');
+  const doc = {
+    id: cid, local_id: cid, name, phone: cleanText(body.customer_phone, 20) || null,
+    address: cleanText(body.customer_address, 160) || null, total_due: 0, total_credit: 0,
+    created_at: new Date().toISOString(), party_type: party.party_type, rate_tier: party.rate_tier,
+    dl_numbers: party.dl_numbers || '', state_code: party.state_code || '',
+  };
+  events.push({ op: 'upsert', collection: 'customers', doc, base_version: 0 });
+  if (party.gstin) {
+    events.push({ op: 'upsert', collection: 'settings', doc: { settings: [{ name: `customer_gst:${cid}`, value: JSON.stringify({
+      gstin: party.gstin, legal_name: '', state: W.stateOf(party.gstin), since: todayIst(), updated: istStamp(),
+    }) }] } });
+  }
+  return { p: W.partyView(doc, { gstin: party.gstin }), made: true };
+}
+
 function payFigures(body, grand) {
   const mode = String(body.payment_mode || 'Due').trim().toLowerCase();
   const isDue = mode === 'due';
@@ -441,7 +480,8 @@ export async function createSale(storePk, user, body) {
   const billDate = todayIst();
   let made;
   await save(storePk, user, async (client, device, { nextId }) => {
-    const p = await partyFor(client, storePk, body.customer_id);
+    const partyEvents = [];
+    const { p, made: newParty } = await billParty(client, storePk, body, nextId, partyEvents);
     const shop = await shopProfile(storePk);
     const meds = await medicinesById(client, storePk, (body.items || []).map((i) => i?.medicine_id ?? i?.id));
     const lines = invoiceLines(body, meds, billDate, new Map());
@@ -462,7 +502,7 @@ export async function createSale(storePk, user, body) {
       ? paymentResult(r2(grand - rets.total), cash, online, prevDue, r2(Math.max(0, prevCredit - rets.total)))
       : paymentResult(grand, cash, online, prevDue, prevCredit);
     const cu = `web-${randomUUID()}`;
-    const custDoc = await currentDoc(storePk, 'customers', p.id);
+    const custDoc = newParty ? null : await currentDoc(storePk, 'customers', p.id);
     const doc = {
       id, local_id: id, client_uuid: cu, bill_no: num.bill_no, fy_start_year: num.fy_start_year, fy_serial: num.fy_serial,
       customer_id: p.id, customer_name: p.name, customer_phone: cleanText(body.customer_phone, 20) || p.phone || '',
@@ -477,11 +517,11 @@ export async function createSale(storePk, user, body) {
     const stockOps = [...need].map(([mid, q]) => ({
       op_uuid: `sale:${cu}:med:${mid}:v1`, op: 'sale', qty_delta: -q, medicine_id: mid, ref_collection: 'sales', ref_id: id,
     }));
-    const events = [{ op: 'upsert', collection: 'sales', doc, stock_ops: stockOps, base_version: 0 }];
+    const events = [...partyEvents, { op: 'upsert', collection: 'sales', doc, stock_ops: stockOps, base_version: 0 }];
     for (const r of rets.list) {
       events.push({ op: 'upsert', collection: 'sales_returns', doc: r.doc, stock_ops: [], base_version: r.base_version });
     }
-    const contact = contactEvent(p, custDoc, body);
+    const contact = custDoc && contactEvent(p, custDoc, body);
     if (contact) events.push(contact);
     const warn = W.creditWarning(p, grand, cash + online + rets.total);
     made = { id, bill_no: num.bill_no, display_bill_no: num.display_bill_no, total_amount: grand, due_date: doc.due_date,

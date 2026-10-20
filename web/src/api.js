@@ -84,6 +84,13 @@ export function fmtExpiry(d) {
   const [y, m] = s.split('-');
   return m ? `${m}/${y.slice(2)}` : s;
 }
+/** A payment's mode in words ("cash" -> "Cash", a return kept in the due -> "Adjusted in due"). */
+const MODES = { cash: 'Cash', online: 'Online', upi: 'UPI', cheque: 'Cheque', card: 'Card', ledger: 'Adjusted in due', due: 'Due' };
+export function modeLabel(m) {
+  const s = String(m || '').trim();
+  return MODES[s.toLowerCase()] || (s ? s[0].toUpperCase() + s.slice(1) : '');
+}
+
 /** "SCB12/FY2026-27" is printed as "SCB12". */
 export function shortNo(no) {
   return String(no || '').split('/FY')[0];
