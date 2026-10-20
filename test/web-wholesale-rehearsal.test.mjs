@@ -255,6 +255,32 @@ try {
   assert.ok(inv3.html.includes('size: 210mm 297mm'), 'A4: two A5 halves');
   step(`bill ${s3.display_bill_no} settles ${s3.returns_applied} of return credit: Return rows and CR/DR NOTE on the invoice`);
 
+  // ── a NEW party typed on the bill (owner, 20 Oct 2026: "the party can be created same as
+  //    the retail saves the customer"): made once from the boxes, then reused by name ─────
+  const newName = `WS NEW PARTY ${tag}`.toUpperCase();
+  const newG = gstin('27', 'AAAPN4321N');
+  const items4 = [{ medicine_id: syr.id, qty: 1, free: 0, rate: 62, rate_tier: 'A', disc_pct: 0, scheme_pct: 0, gst_percent: 5 }];
+  const noName = await wcall('POST', '/api/web/wholesale/sales', { token: owner, body: { customer_id: 0, customer_name: '', items: items4, payment_mode: 'Due' } });
+  assert.equal(noName.status, 400); assert.equal(noName.details?.code, 'party_required');
+  const s4 = await wok('POST', '/api/web/wholesale/sales', { token: owner, body: {
+    customer_id: 0, customer_name: newName.toLowerCase(), customer_phone: '9111111111', customer_address: 'Testpur',
+    buyer_gstin: newG, buyer_dl: '20B-NEW 21B-NEW', items: items4, payment_mode: 'Due' } });
+  const made = (await wok('GET', `/api/web/wholesale/parties?q=${encodeURIComponent(newName)}`, { token: owner })).filter((r) => r.name === newName);
+  assert.equal(made.length, 1, 'one party made');
+  const madeDoc = await wok('GET', `/api/web/wholesale/parties/${made[0].id}`, { token: owner });
+  assert.equal(madeDoc.gstin, newG); assert.equal(madeDoc.phone, '9111111111'); assert.equal(madeDoc.rate_tier, 'A');
+  assert.equal(madeDoc.state_code, '27'); assert.equal(madeDoc.dl_numbers, '20B-NEW 21B-NEW'); assert.equal(madeDoc.address, 'Testpur');
+  const b4 = await wok('GET', `/api/web/wholesale/sales/${s4.id}`, { token: owner });
+  assert.equal(Number(b4.customer_id), Number(made[0].id));
+  const s5 = await wok('POST', '/api/web/wholesale/sales', { token: owner, body: {
+    customer_id: 0, customer_name: `  ${newName.toLowerCase()} `, items: items4, payment_mode: 'Due' } });
+  const b5 = await wok('GET', `/api/web/wholesale/sales/${s5.id}`, { token: owner });
+  assert.equal(Number(b5.customer_id), Number(made[0].id), 'the same name again uses the same party');
+  assert.equal((await wok('GET', `/api/web/wholesale/parties?q=${encodeURIComponent(newName)}`, { token: owner })).filter((r) => r.name === newName).length, 1);
+  const pulledParty = (await allChanges(dev.token)).findLast((c) => c.collection === 'customers' && Number(c.local_id) === Number(made[0].id))?.doc;
+  assert.equal(pulledParty?.name, newName, 'a paired PC pulls the new party');
+  step(`new party "${newName}" typed on bill ${s4.display_bill_no}: made once (GSTIN, phone, tier A, state 27), reused by name on ${s5.display_bill_no}; no name refused`);
+
   // ── a payment with a receipt number ────────────────────────────────────────────────
   const pay = await wok('POST', '/api/web/payments/customers', { token: owner, body: {
     customer_id: p1.id, amount: 100, mode: 'cash', receipt_no: `R-${tag}`, allocations: [{ bill_id: s1.id, amount: 100 }] } });
