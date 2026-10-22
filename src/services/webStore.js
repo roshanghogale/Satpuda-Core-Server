@@ -1044,6 +1044,18 @@ async function fullMedicine(storePk, id) {
   return doc || {};
 }
 
+/** { cash, online } a stored purchase was paid at entry, by the rule its supplier's due uses
+ *  (PURCHASE_ENTRY_PAID_SQL): cash + online at entry, else amount_paid_at_entry, else amount_paid. */
+export function purchaseEntryPaid(p) {
+  const cash = r2(Number(p?.cash_paid_at_entry || 0));
+  const online = r2(Number(p?.online_paid_at_entry || 0));
+  if (cash + online > 0.009) return { cash, online };
+  for (const v of [p?.amount_paid_at_entry, p?.amount_paid]) {
+    if (r2(Number(v || 0)) > 0.009) return { cash: r2(Number(v)), online: 0 };
+  }
+  return { cash, online };
+}
+
 function purchaseUnits(line) {
   const tps = Math.max(1, Number(line.tablets_per_stripe || 1));
   const strip = isStripCountType(line.type, line.unit);
@@ -1140,10 +1152,14 @@ export async function editPurchase(storePk, user, id, body, { wholesale = false 
     const sup = await resolveSupplier(client, storePk, { supplier_id: body.supplier_id ?? old.supplier_id, supplier_name: body.supplier_name }, nextId, events);
     const lines = await purchaseLines(client, storePk, body, nextId, events, { wholesale });
     const same = Number(sup.local_id) === Number(old.supplier_id);
+    // An edit that says nothing about the payment keeps what the purchase was paid at entry; it
+    // was read as Cash 0 and the paid bill became a full due on the supplier.
+    const pay = body.cash_paid === undefined && body.online_paid === undefined
+      ? purchaseEntryPaid(old) : { cash: body.cash_paid, online: body.online_paid };
     const calc = purchaseCalc({ items: lines.map((l) => ({ ...l })), overall_discount: body.overall_discount,
       previous_due: same ? Number(old.previous_due || 0) : Number(sup.total_due || 0),
       previous_credit: same ? Number(old.previous_credit || 0) : Number(sup.total_credit || 0),
-      cash_paid: body.cash_paid, online_paid: body.online_paid, expenditure: body.expenditure,
+      cash_paid: pay.cash, online_paid: pay.online, expenditure: body.expenditure,
       gst_calc_method: body.gst_calc_method || old.gst_calc_method });
     const ver = Number(old.version || 1) + 1;
     const cu = old.client_uuid || `purchase-${id}`;

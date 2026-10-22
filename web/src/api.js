@@ -101,3 +101,18 @@ export function todayIso() {
 export function monthStartIso() {
   return `${todayIso().slice(0, 8)}01`;
 }
+/** { cash, online } a saved purchase was paid at entry, for its edit form: the rule the
+ *  supplier's due uses (server PURCHASE_ENTRY_PAID_SQL) -- cash + online at entry, else
+ *  amount_paid_at_entry, else amount_paid. From the cash / online fields alone, a purchase
+ *  stored with only its paid-at-entry figure opened with Cash 0, and saving the edit turned
+ *  the paid bill into a full due (346 such purchases on the live store, 22 Oct 2026). */
+export function purchaseEntryPaid(p) {
+  const n = (v) => Math.round((Number(v) || 0) * 100) / 100;
+  const cash = n(p?.cash_paid_at_entry);
+  const online = n(p?.online_paid_at_entry);
+  if (cash + online > 0.009) return { cash, online };
+  for (const v of [p?.amount_paid_at_entry, p?.amount_paid]) {
+    if (n(v) > 0.009) return { cash: n(v), online: 0 };
+  }
+  return { cash, online };
+}

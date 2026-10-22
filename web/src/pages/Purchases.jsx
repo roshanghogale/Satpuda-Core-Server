@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
-import { api, fmtDate, fmtExpiry, money, monthStartIso, qs, todayIso } from '../api.js';
+import { api, fmtDate, fmtExpiry, money, monthStartIso, purchaseEntryPaid, qs, todayIso } from '../api.js';
 import { MedicineSearch, PartyPicker, PayDue, useDebounced } from './common.jsx';
 
 const EMPTY = { name: '', batch_no: '', expiry: '', type: 'Tablet', unit: '10', qty: '', free_qty: '', rate: '', mrp: '', gst_pct: '12', discount_pct: '', hsn_code: '', schedule: '', manufacturer: '', rate_a: '', rate_b: '', rate_c: '' };
@@ -50,7 +50,8 @@ function PurchaseForm({ editId, ws = false }) {
     api(`/purchases/${editId}`).then((p) => {
       setSupplier({ id: p.supplier_id, name: p.supplier_name }); setBillNo(p.bill_number || ''); setDate(String(p.purchase_date).slice(0, 10));
       setMethod(p.gst_calc_method || 'discount_before_gst'); setOd(String(p.overall_discount || ''));
-      setCash(String(p.cash_paid_at_entry || '')); setOnline(String(p.online_paid_at_entry || '')); setVersion(p.version);
+      const paid = purchaseEntryPaid(p);
+      setCash(String(paid.cash || '')); setOnline(String(paid.online || '')); setVersion(p.version);
       setLines((p.items || []).map((it) => ({ medicine_id: it.medicine_id, name: it.name, batch_no: it.batch_no || '', expiry: fmtExpiry(it.expiry_date),
         type: it.type || '', unit: it.unit || '', qty: String(it.qty), free_qty: String(it.free_qty || ''), rate: String(it.rate), mrp: String(it.mrp),
         gst_pct: String(it.gst_pct), discount_pct: String(it.discount_pct || ''), hsn_code: it.hsn_code || '', schedule: it.schedule || '', manufacturer: it.manufacturer || '',
