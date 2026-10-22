@@ -11,6 +11,65 @@ export function useDebounced(value, ms = 250) {
   return v;
 }
 
+/**
+ * A text box with suggestions (villages, doctors): typing shows the ones that match; arrows
+ * move, Enter takes the marked one, Esc closes the list.
+ */
+export function SuggestInput({ value, onChange, options, placeholder, inputRef, onPicked, className }) {
+  const [open, setOpen] = useState(false);
+  const [hi, setHi] = useState(-1);
+  const t = String(value || '').trim().toUpperCase();
+  const shown = (options || []).filter((o) => {
+    const name = typeof o === 'string' ? o : o.name;
+    return !t || (name.toUpperCase().includes(t) && name.toUpperCase() !== t);
+  }).slice(0, 12);
+  function pick(o) {
+    const name = typeof o === 'string' ? o : o.name;
+    onChange(name);
+    onPicked?.(o);
+    setOpen(false); setHi(-1);
+  }
+  return (
+    <div className="picker">
+      <input ref={inputRef} className={className} value={value} placeholder={placeholder} autoComplete="off"
+        onFocus={() => setOpen(true)} onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onChange={(e) => { onChange(e.target.value); setOpen(true); setHi(-1); }}
+        onKeyDown={(e) => {
+          if (!open || !shown.length) return;
+          if (e.key === 'ArrowDown') { setHi((h) => Math.min(shown.length - 1, h + 1)); e.preventDefault(); }
+          if (e.key === 'ArrowUp') { setHi((h) => Math.max(-1, h - 1)); e.preventDefault(); }
+          if (e.key === 'Enter' && hi >= 0 && shown[hi]) { e.preventDefault(); e.stopPropagation(); pick(shown[hi]); }
+          if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); setOpen(false); }
+        }} />
+      {open && shown.length > 0 && (
+        <div className="dropdown">
+          {shown.map((o, i) => {
+            const name = typeof o === 'string' ? o : o.name;
+            return (
+              <button type="button" tabIndex={-1} key={name} className={i === hi ? 'hi' : ''} onMouseDown={() => pick(o)}>
+                <span>{name}</span>
+                {typeof o !== 'string' && o.phone ? <span className="muted small">{o.phone}</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** What a new bill starts with: default doctor + phone, doctors, villages (the PC's Sales). */
+export function useSalesDefaults() {
+  const [d, setD] = useState(null);
+  useEffect(() => {
+    let live = true;
+    api('/sales/defaults').then((x) => { if (live) setD(x); })
+      .catch(() => { if (live) setD({ default_doctor: '', default_doctor_phone: '', doctors: [], villages: [], default_village: '' }); });
+    return () => { live = false; };
+  }, []);
+  return d;
+}
+
 /** Type a customer or supplier name; pick one from the list or keep the typed (new) name. */
 export function PartyPicker({ kind, value, onChange, placeholder }) {
   const [text, setText] = useState(value?.name || '');

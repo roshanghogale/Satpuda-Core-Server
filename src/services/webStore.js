@@ -576,6 +576,55 @@ async function resolveSupplier(client, storePk, { supplier_id, supplier_name, su
   return { local_id: id, name, phone: doc.phone, total_due: 0, total_credit: 0 };
 }
 
+const listOf = (v) => {
+  try {
+    const data = Array.isArray(v) ? v : JSON.parse(String(v || '[]'));
+    return Array.isArray(data) ? data.map((x) => String(x || '').trim()).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * What a new Sales bill starts with, as the PC's Sales page reads it: the default doctor
+ * (Contacts > Doctors > Set default, settings row billing_layout_prefs.default_doctor) with
+ * that doctor's phone, the doctors list, and the villages with the default village.
+ */
+export async function salesDefaults(storePk) {
+  const [kv, dd, docs] = await Promise.all([
+    query(`SELECT name, value FROM store_settings WHERE store_pk=$1 AND name = ANY($2::text[])`,
+      [storePk, ['billing_layout_prefs', 'customer_villages', 'default_customer_village']]),
+    query(`SELECT villages, default_village FROM store_dropdowns WHERE store_pk=$1`, [storePk]),
+    query(`SELECT name, phone FROM doctors WHERE store_pk=$1 AND NOT deleted AND BTRIM(COALESCE(name,'')) <> ''
+            ORDER BY UPPER(BTRIM(name)), local_id LIMIT 2000`, [storePk]),
+  ]);
+  const set = new Map(kv.rows.map((r) => [r.name, r.value]));
+  let prefs = {};
+  try { prefs = JSON.parse(String(set.get('billing_layout_prefs') || '{}')) || {}; } catch { prefs = {}; }
+  const defaultDoctor = String(prefs.default_doctor || '').split(/\s+/).filter(Boolean).join(' ');
+  const seen = new Set();
+  const doctors = [];
+  for (const d of docs.rows) {
+    const n = String(d.name).trim();
+    if (seen.has(n.toUpperCase())) continue;
+    seen.add(n.toUpperCase());
+    doctors.push({ name: n, phone: String(d.phone || '').trim() });
+  }
+  const villagesDd = listOf(dd.rows[0]?.villages);
+  const villages = [];
+  for (const v of villagesDd.length ? villagesDd : listOf(set.get('customer_villages'))) {
+    if (!villages.some((x) => x.toUpperCase() === v.toUpperCase())) villages.push(v);
+  }
+  const defaultVillage = String(dd.rows[0]?.default_village || set.get('default_customer_village') || '').trim();
+  return {
+    default_doctor: defaultDoctor,
+    default_doctor_phone: doctors.find((d) => d.name.toUpperCase() === defaultDoctor.toUpperCase())?.phone || '',
+    doctors,
+    villages,
+    default_village: defaultVillage,
+  };
+}
+
 // ─── Sales ────────────────────────────────────────────────────────────────────
 
 export async function medicinesById(client, storePk, ids) {

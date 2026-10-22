@@ -21,6 +21,18 @@ function PermissionSwitches({ all, value, onChange, disabled }) {
   );
 }
 
+/** What a web action was, in words (the audit keeps a short key such as sale.create). */
+const ACTIONS = {
+  'sale.create': 'New bill', 'sale.edit': 'Bill edited', 'sale.delete': 'Bill deleted', 'sale_bill_no_changed': 'Bill number changed',
+  'sales_return.create': 'Sales return', 'purchase.create': 'New purchase', 'purchase.edit': 'Purchase edited',
+  'purchase.delete': 'Purchase deleted', 'customer_payment.create': 'Payment received', 'supplier_payment.create': 'Payment made',
+  'party.create': 'New party', 'party.edit': 'Party details changed', 'medicine.edit': 'Medicine edited',
+  'staff.add': 'Staff login added', 'staff.change': 'Staff login changed', 'staff.reset_password': 'Staff password reset',
+  'staff.delete': 'Staff login deleted',
+};
+const actionLabel = (a) => ACTIONS[a] || String(a || '').replace(/[._]+/g, ' ').replace(/^./, (c) => c.toUpperCase());
+const roleLabel = (r) => (r === 'owner' ? 'Owner' : 'Staff');
+
 /** Shown once: the password is not kept anywhere readable after this. */
 function PasswordOnce({ who, password, onClose }) {
   return (
@@ -65,7 +77,7 @@ export default function Staff({ me }) {
           <thead><tr><th>Login ID</th><th>Name</th><th>Role</th><th>Permissions</th><th>Last sign-in</th><th /></tr></thead>
           <tbody>{data.users.map((u) => (
             <tr key={u.id} className={u.is_active ? '' : 'dim'}>
-              <td>{u.username}</td><td>{u.full_name}</td><td>{u.role}{u.is_active ? '' : ' (off)'}{u.locked ? ' (locked)' : ''}</td>
+              <td>{u.username}</td><td>{u.full_name}</td><td>{roleLabel(u.role)}{u.is_active ? '' : ' (off)'}{u.locked ? ' (locked)' : ''}</td>
               <td className="small">{u.role === 'owner' ? 'everything' : u.permissions.map((k) => data.permissions.find((p) => p.key === k)?.label.split(':')[0]).filter((v, i, a) => a.indexOf(v) === i).join(', ')}</td>
               <td className="small">{u.last_login_at ? fmtDate(u.last_login_at) : 'never'}</td>
               <td className="row">{u.role !== 'owner' && <>
@@ -82,7 +94,7 @@ export default function Staff({ me }) {
         <h3>Who did what (web)</h3>
         <table className="grid compact">
           <tbody>{audit.map((a) => <tr key={a.id}><td className="small">{new Date(a.created_at).toLocaleString('en-IN')}</td><td>{a.username || 'Satpuda support'}</td>
-            <td>{a.action}</td><td>{a.ref_no ? String(a.ref_no).split('/FY')[0] : (a.detail?.username || '')}</td></tr>)}</tbody>
+            <td>{actionLabel(a.action)}</td><td>{a.ref_no ? String(a.ref_no).split('/FY')[0] : (a.detail?.username || '')}</td></tr>)}</tbody>
         </table>
       </div>
       {adding && (

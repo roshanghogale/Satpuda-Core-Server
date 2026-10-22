@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { api, fmtDate, money, shortNo } from '../api.js';
-import { BillPrint, MedicineSearch, PartyPicker, printNow, useDebounced } from './common.jsx';
+import { BillPrint, MedicineSearch, PartyPicker, printNow, SuggestInput, useDebounced, useSalesDefaults } from './common.jsx';
 
 /** New bill, or (with :id) edit of an old one. Totals come from the server's rules. */
 export default function Billing({ me }) {
@@ -25,6 +25,14 @@ export default function Billing({ me }) {
   const [openRets, setOpenRets] = useState([]);
   const [useRets, setUseRets] = useState([]);
   const [askRets, setAskRets] = useState(false);
+  // Contacts > Doctors > Set default on the PC (settings billing_layout_prefs.default_doctor):
+  // every new bill starts with that doctor, as on the PC and the phone (owner, 19 Oct 2026).
+  const defs = useSalesDefaults();
+  const doctorTouched = useRef(false);
+  useEffect(() => {
+    if (!id && defs?.default_doctor && !doctorTouched.current) setDoctor(defs.default_doctor);
+  }, [defs, id]);
+  const doctorPhone = (defs?.doctors || []).find((d) => d.name.toUpperCase() === doctor.trim().toUpperCase())?.phone || '';
 
   useEffect(() => {
     setOpenRets([]); setUseRets([]); setAskRets(false);
@@ -105,7 +113,8 @@ export default function Billing({ me }) {
   }
 
   function fresh() {
-    setSaved(null); setLines([]); setCustomer({ id: null, name: '' }); setPhone(''); setDoctor('');
+    setSaved(null); setLines([]); setCustomer({ id: null, name: '' }); setPhone(''); setDoctor(defs?.default_doctor || '');
+    doctorTouched.current = false;
     setDiscPct(''); setCash(''); setOnline(''); setCalc(null); setPaidTouched(false);
     setOpenRets([]); setUseRets([]); setAskRets(false);
     if (id) nav('/billing');
@@ -135,7 +144,9 @@ export default function Billing({ me }) {
         <div className="grid3">
           <label>Customer<PartyPicker kind="customers" value={customer} onChange={setCustomer} placeholder="Empty = walk-in (paid in full)" /></label>
           <label>Phone<input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder={customer.id ? 'saved' : 'new customer only'} /></label>
-          <label>Doctor<input value={doctor} onChange={(e) => setDoctor(e.target.value)} placeholder="needed for scheduled medicine" /></label>
+          <label>Doctor{doctorPhone ? <span className="muted small"> · {doctorPhone}</span> : null}
+            <SuggestInput value={doctor} options={defs?.doctors || []} placeholder="needed for scheduled medicine"
+              onChange={(v) => { doctorTouched.current = true; setDoctor(v); }} /></label>
         </div>
         {calc && Number(calc.previous_due) > 0 && <p className="warn small">Old due of this customer: ₹ {money(calc.previous_due)}</p>}
         {openRets.length > 0 && !askRets && (

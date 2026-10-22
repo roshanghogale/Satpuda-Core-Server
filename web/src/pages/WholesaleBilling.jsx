@@ -55,6 +55,8 @@ export default function WholesaleBilling({ me, can }) {
   const { id } = useParams();
   const nav = useNavigate();
   const [party, setParty] = useState(null);
+  // A name typed that is not a party yet: saving the bill makes the party from the boxes.
+  const [typedName, setTypedName] = useState('');
   const [partyForm, setPartyForm] = useState(null);
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
@@ -81,7 +83,25 @@ export default function WholesaleBilling({ me, can }) {
   const [askRets, setAskRets] = useState(false);
 
   async function choose(p, { keepBill = false } = {}) {
-    if (!p) { setParty(null); return; }
+    if (!p) {
+      // The pick was cleared (the name was edited): empty each box that still holds what the
+      // pick filled in, so a new party saved from the boxes never carries another party's
+      // GSTIN / DL on a tax invoice; what the user typed stays. Lines at the old party's tier
+      // go back to Rate A (a rate typed by hand stays). Due, returns, terms follow `party`.
+      const old = party;
+      setParty(null);
+      if (!old) return;
+      const same = (a, b) => String(a || '').trim().toUpperCase() === String(b || '').trim().toUpperCase();
+      setPhone((v) => (same(v, old.phone) ? '' : v));
+      setAddress((v) => (same(v, old.address) ? '' : v));
+      setBuyerGstin((v) => (same(v, old.gstin) ? '' : v));
+      setBuyerDl((v) => (same(v, old.dl_numbers) ? '' : v));
+      if (old.rate_tier && old.rate_tier !== 'A') {
+        setLines((ls) => ls.map((l) => (l.rate_tier === old.rate_tier
+          ? { ...l, rate_tier: 'A', rate: Number(l.tier_rates?.A) > 0 ? String(l.tier_rates.A) : '' } : l)));
+      }
+      return;
+    }
     try {
       const full = await api(`/wholesale/parties/${p.id}`);
       setParty(full);
@@ -132,7 +152,8 @@ export default function WholesaleBilling({ me, can }) {
   const retOpen = n2(pickedRets.reduce((x, r) => x + r.left, 0));
   const retSettled = n2(loadedRets.reduce((x, r) => x + Number(r.amount || 0), 0));
   const body = {
-    sale_id: id ? Number(id) : undefined, customer_id: party?.id, items, buyer_gstin: buyerGstin, buyer_dl: buyerDl,
+    sale_id: id ? Number(id) : undefined, customer_id: party?.id, customer_name: party || id ? undefined : typedName.trim(),
+    items, buyer_gstin: buyerGstin, buyer_dl: buyerDl,
     customer_phone: phone, customer_address: address, transport, lr_no: lrNo, eway_bill_no: eway,
     payment_mode: mode, cash_paid: mode === 'Cash' ? Number(cash) || 0 : 0, online_paid: mode === 'Online' ? Number(online) || 0 : 0,
     returns_total: id ? undefined : retOpen, returns_settled: id ? retSettled : undefined,
@@ -166,6 +187,8 @@ export default function WholesaleBilling({ me, can }) {
   const retUsed = calc?.returns_total || 0;
   const net = n2(grand - retUsed);
   const rateMissing = lines.some((l) => !(Number(l.rate) > 0));
+  const newParty = !party && !id && typedName.trim() ? typedName.trim().toUpperCase() : '';
+  const partyOk = !!party || !!newParty;
   const overStock = lines.filter((l) => (Number(l.qty) || 0) + (Number(l.free) || 0) > Number(l.stock_packs || 0) + (held[l.medicine_id] || 0) + 1e-9);
 
   async function save(andPrint) {
@@ -182,7 +205,7 @@ export default function WholesaleBilling({ me, can }) {
   }
 
   function fresh() {
-    setSaved(null); setParty(null); setPhone(''); setAddress(''); setBuyerGstin(''); setBuyerDl(''); setLines([]); setOverall('');
+    setSaved(null); setParty(null); setTypedName(''); setPhone(''); setAddress(''); setBuyerGstin(''); setBuyerDl(''); setLines([]); setOverall('');
     setTransport(''); setLrNo(''); setEway(''); setMode('Due'); setCash(''); setOnline(''); setCalc(null); setNotes([]);
     setHeld({}); setLoadedRets([]); setOpenRets([]); setUseRets([]); setAskRets(false); setVersion(null);
     if (id) nav('/billing');
@@ -214,7 +237,8 @@ export default function WholesaleBilling({ me, can }) {
         <h2>{id ? 'Edit tax invoice' : 'Wholesale bill (tax invoice)'} <span className="muted small">{me.today}</span></h2>
         <div className="grid4">
           <label>Party{party ? <span className="muted small"> · Rate {party.rate_tier}{party.party_type === 'medical' ? ' · medical' : ''}</span> : null}
-            <WsPartyPicker value={party} onPick={(p) => choose(p)} autoFocus={!id} /></label>
+            <WsPartyPicker value={party} onPick={(p) => choose(p)} onType={setTypedName} autoFocus={!id} />
+            {newParty && <span className="muted small">New party: saved with this bill (Rate A) from the boxes here</span>}</label>
           <label>Phone<input value={phone} onChange={(e) => setPhone(e.target.value)} /></label>
           <label>Address<input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Town / address" /></label>
           <div className="row">
@@ -340,10 +364,10 @@ export default function WholesaleBilling({ me, can }) {
         {error && <div className="error">{error}</div>}
         <div className="row end">
           {id && <button className="btn" onClick={() => nav('/sales')}>Cancel</button>}
-          <button className="btn" disabled={busy || !calc || !party || rateMissing || overStock.length > 0} onClick={() => save(false)}>Save bill</button>
-          <button className="btn primary" disabled={busy || !calc || !party || rateMissing || overStock.length > 0} onClick={() => save(true)}>{busy ? 'Saving…' : 'Save & print'}</button>
+          <button className="btn" disabled={busy || !calc || !partyOk || rateMissing || overStock.length > 0} onClick={() => save(false)}>Save bill</button>
+          <button className="btn primary" disabled={busy || !calc || !partyOk || rateMissing || overStock.length > 0} onClick={() => save(true)}>{busy ? 'Saving…' : 'Save & print'}</button>
         </div>
-        {!party && lines.length > 0 && <p className="warn small">Pick the party (a customer) for a wholesale bill.</p>}
+        {!partyOk && lines.length > 0 && <p className="warn small">Pick the party, or type a new party's name.</p>}
       </div>
       {partyForm && <PartyForm party={partyForm.id ? partyForm : null} onClose={() => setPartyForm(null)}
         onSaved={(p) => { setPartyForm(null); choose(p); }} />}
