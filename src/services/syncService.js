@@ -2561,6 +2561,9 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
   return withDocExtrasAll(await mapper(rows));
 }
 
+const SYNC_CURSOR_SQL = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+const SYNC_CURSOR_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
 export async function pullCollection(
   storePk,
   collection,
@@ -2574,9 +2577,14 @@ export async function pullCollection(
   // since timestamp (no overlap rewind) so bulk-imported rows that share one
   // updated_at still page correctly. Overlap applies only to first incremental page.
   const after = Number(afterId) || 0;
-  const cutoff = after > 0
-    ? (parseTs(since) || new Date(0))
-    : watermarkCutoff(since);
+  // A client that pages with the `sync_cursor` it was sent (updated_at to the microsecond)
+  // gets it compared exactly. A JS Date keeps milliseconds only, and updated_at is stored to
+  // the microsecond: rows written by one bulk statement (Pallavi, store 145, 22 Oct 2026: all
+  // 43,544 medicines at 15:08:51.256972) were all "after" the millisecond cursor, so the
+  // next page was the first page again and a full pull stopped at 5,000 rows.
+  const exactSince = after > 0 && typeof since === 'string' && SYNC_CURSOR_RE.test(since) ? since : null;
+  const cutoff = exactSince
+    || (after > 0 ? (parseTs(since) || new Date(0)) : watermarkCutoff(since));
   const lim = Math.min(Number(limit) || 5000, 5000);
 
   if (collection === 'pharmacy_profile') {
@@ -2761,6 +2769,12 @@ export async function pullCollection(
       return [];
     default:
       throw new AppError(400, `Unknown collection: ${collection}`);
+  }
+
+  // Every document carries its updated_at to the microsecond for the next page's cursor
+  // (sync_cursor; older clients ignore it).
+  if (sql.includes('updated_at > $2')) {
+    sql = sql.replace(/^\s*SELECT /, `SELECT ${SYNC_CURSOR_SQL} AS sync_cursor, `);
   }
 
   // Stable order + keyset so clients can page past rows that share updated_at.
