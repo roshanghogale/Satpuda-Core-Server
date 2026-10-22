@@ -116,6 +116,8 @@ input.num { width: 72px; text-align: right; padding: 4px 6px; }
 .bill-print { background: #fff; color: #000; border: 1px solid var(--line); border-radius: 8px; padding: 16px; max-width: 800px; margin: 0 auto 12px; font-size: 13px; }
 .bp-head { text-align: center; border-bottom: 1px dashed #000; padding-bottom: 8px; margin-bottom: 8px; }
 .bp-shop { font-size: 18px; font-weight: 700; }
+.bp-title { font-size: 15px; font-weight: 700; letter-spacing: 1px; margin-top: 6px; }
+.bp-decl { font-size: 12px; font-style: italic; }
 .bp-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px; margin-bottom: 8px; }
 .bp-lines { width: 100%; border-collapse: collapse; }
 .bp-lines th, .bp-lines td { border-bottom: 1px solid #ccc; padding: 3px 4px; text-align: left; }
