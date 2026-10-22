@@ -24,6 +24,7 @@ import { doctorMargin, NO_DOCTOR } from './doctorMargin.js';
 import { displayPurchaseNo, displaySalesBillNo } from '../utils/fy.js';
 import { withDocExtras } from './docExtras.js';
 import { WHOLESALE, lineRates, unitsPerPack } from './wholesaleSale.js';
+import { HEADING_KV, REASON_KV, billHeadingInfo } from './billHeading.js';
 
 const r2 = (x) => pyRound(x, 2);
 
@@ -83,11 +84,25 @@ export async function save(storePk, user, build, auditEntry) {
 // ─── Reads ────────────────────────────────────────────────────────────────────
 
 export async function profile(storePk) {
+  const [{ rows }, heading] = await Promise.all([
+    query(
+      `SELECT name, address, phone, email, gstin, dl_number, gst_enabled, fssai_number, show_fssai_on_bill
+         FROM pharmacy_profiles WHERE store_pk=$1`, [storePk],
+    ),
+    storeBillHeading(storePk),
+  ]);
+  // The bill heading (Tax Invoice / Bill of Supply) rides along: the web's bill prints it.
+  return { ...(rows[0] || {}), ...heading };
+}
+
+/** The store's bill heading from its settings rows (services/billHeading.js). */
+export async function storeBillHeading(storePk) {
   const { rows } = await query(
-    `SELECT name, address, phone, email, gstin, dl_number, gst_enabled, fssai_number, show_fssai_on_bill
-       FROM pharmacy_profiles WHERE store_pk=$1`, [storePk],
+    'SELECT name, value FROM store_settings WHERE store_pk=$1 AND name = ANY($2::text[])',
+    [storePk, [HEADING_KV, REASON_KV]],
   );
-  return rows[0] || {};
+  const kv = new Map(rows.map((r) => [r.name, r.value]));
+  return billHeadingInfo(kv.get(HEADING_KV), kv.get(REASON_KV));
 }
 
 /** Medicines a bill can sell today: live, not hidden, in stock, not expired. */

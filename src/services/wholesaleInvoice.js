@@ -7,8 +7,15 @@
  *
  * Input is the invoice context (webWholesale.invoiceContext), a plain object, so it renders
  * without a database; test/wholesaleSale.test.mjs compares it with the Python output.
+ *
+ * Bill of Supply (inv.bill_of_supply, the shop's "Bill heading" setting -- services/billHeading.js,
+ * owner 22 Oct 2026): titled BILL OF SUPPLY, no SGST/CGST/IGST columns, no GST table and no tax
+ * rows in the totals. The tax is printed inside the RATE, GROSS AMT and Discount instead
+ * (supplyGross), so SUB TOTAL - Discount + CR/DR is still the bill's total; the saved bill and
+ * its total are unchanged. A composition dealer's bill prints inv.supply_declaration where the GST table was.
  */
 import { pyRound } from './billRules.js';
+import { BILL_OF_SUPPLY_TITLE } from './billHeading.js';
 
 /** Item-table rows one box holds (lines and Return rows alike, one text line each). */
 export const ROWS_PER_PAGE = 18;
@@ -72,7 +79,7 @@ function shopNamePt(name) {
   return Math.max(10.0, Math.min(18.0, 215.0 / (n * 0.68)));
 }
 
-function columns(intra) {
+function columns(intra, supply = false) {
   const cols = [
     ['sr', 'S.', 'c', '3.2%'], ['name', 'PRODUCT NAME', 'l', ''],
     ['mfg', 'MFG.', 'l', '7.8%'], ['pack', 'PACK', 'l', '5.6%'],
@@ -81,7 +88,7 @@ function columns(intra) {
     ['qty', 'QTY', 'r', '4.4%'], ['free', 'FREE', 'r', '4.2%'],
     ['rate', 'RATE', 'r', '6.6%'],
   ];
-  if (intra) cols.push(['sgst', 'SGST%', 'r', '5%'], ['cgst', 'CGST%', 'r', '5%']);
+  if (supply) { /* a Bill of Supply states no tax */ } else if (intra) cols.push(['sgst', 'SGST%', 'r', '5%'], ['cgst', 'CGST%', 'r', '5%']);
   else cols.push(['igst', 'IGST%', 'r', '6%']);
   cols.push(['gross', 'GROSS AMT.', 'r', '8.8%']);
   return cols;
@@ -90,10 +97,27 @@ function cls(key, align) {
   return { l: key === 'name' ? 't' : 'l', c: 'c', r: 'n' }[align];
 }
 
-function lineCells(it, sr) {
+/** A line's tax in rupees (CGST + SGST + IGST). */
+function lineTax(it) {
+  return pyRound(f(it.cgst) + f(it.sgst) + f(it.igst), 2);
+}
+
+/** A Bill of Supply line's GROSS AMT: what it charges before its discount, tax in. A line with
+ *  no discount is exactly gross + its tax; a discounted one takes the tax on its full gross,
+ *  and the difference (the discount's own tax) goes into the Discount row (supplyDiscount). */
+function supplyGross(it, gross) {
+  const off = f(it.line_discount ?? it.item_discount);
+  if (Math.abs(off) < 0.005) return pyRound(f(gross) + lineTax(it), 2);
+  return pyRound(f(gross) + pyRound(f(gross) * f(it.gst_percent) / 100, 2), 2);
+}
+
+function lineCells(it, sr, supply = false) {
   const pct = f(it.gst_percent);
   let gross = it.gross;
   if (gross === null || gross === undefined) gross = f(it.qty) * f(it.rate);
+  // Bill of Supply: the rate and the gross with the line's tax in them (what is charged).
+  const rate = supply ? pyRound(f(it.rate) * (100 + pct) / 100, 2) : it.rate;
+  if (supply) gross = supplyGross(it, gross);
   return {
     sr: String(sr),
     name: e(String(it.name || '').toUpperCase()),
@@ -105,7 +129,7 @@ function lineCells(it, sr) {
     mrp: mb(it.mrp),
     qty: qty(it.qty),
     free: qty(it.free),
-    rate: m(it.rate),
+    rate: m(rate),
     sgst: fx(pct / 2),
     cgst: fx(pct / 2),
     igst: fx(pct),
@@ -174,13 +198,14 @@ export function billReturnRows(returns) {
 }
 
 function itemsTable(inv, entries) {
-  const cols = columns(inv.intra_state !== false);
+  const supply = Boolean(inv.bill_of_supply);
+  const cols = columns(inv.intra_state !== false, supply);
   const colgroup = cols.map(([, , , w]) => (w ? `<col style='width:${w}'>` : '<col>')).join('');
   const head = cols.map(([, h]) => `<th>${e(h)}</th>`).join('');
   const body = entries.map(([kind, data]) => {
     if (kind === 'item') {
       const [it, sr] = data;
-      const cells = lineCells(it, sr);
+      const cells = lineCells(it, sr, supply);
       return `<tr class='r'>${cols.map(([k, , a]) => `<td class='${cls(k, a)}'>${cells[k] ?? ''}</td>`).join('')}</tr>`;
     }
     return returnRow(data, cols);
@@ -231,11 +256,27 @@ function bankLines(shop) {
   return out;
 }
 
+/** SUB TOTAL and Discount as printed. On a Bill of Supply the tax is inside both: SUB TOTAL
+ *  is the lines' GROSS AMT (supplyGross), the Discount what takes it to the lines' amounts. */
+function subAndDiscount(inv) {
+  if (!inv.bill_of_supply) return [inv.sub_total, inv.line_discount];
+  let sub = 0;
+  let charged = 0;
+  for (const it of inv.lines || []) {
+    let gross = it.gross;
+    if (gross === null || gross === undefined) gross = f(it.qty) * f(it.rate);
+    sub = pyRound(sub + supplyGross(it, gross), 2);
+    charged = pyRound(charged + f(gross) - f(it.line_discount ?? it.item_discount) + lineTax(it), 2);
+  }
+  return [sub, pyRound(sub - charged, 2)];
+}
+
 function totals(inv) {
   const intra = inv.intra_state !== false;
   const ret = f(inv.returns_total);
-  const rows = [['SUB TOTAL', m(inv.sub_total)], ['Discount', mb(inv.line_discount)], ['Bill Disc', mb(inv.bill_discount)]];
-  if (intra) rows.push(['SGST Value', mb(inv.sgst_total)], ['CGST Value', mb(inv.cgst_total)]);
+  const [sub, disc] = subAndDiscount(inv);
+  const rows = [['SUB TOTAL', m(sub)], ['Discount', mb(disc)], ['Bill Disc', mb(inv.bill_discount)]];
+  if (inv.bill_of_supply) { /* no tax rows */ } else if (intra) rows.push(['SGST Value', mb(inv.sgst_total)], ['CGST Value', mb(inv.cgst_total)]);
   else rows.push(['IGST Value', mb(inv.igst_total)]);
   rows.push(['CR/DR', mb(inv.round_off)], ['CR/DR NOTE', ret ? fx(-ret) : '0.00']);
   let body = rows.map(([k, v]) => `<tr><td>${e(k)}</td><td class='n'>${v}</td></tr>`).join('');
@@ -290,7 +331,8 @@ function box(inv, entries, page, pages, copyLabel) {
     meta.push(['Due Date', e(dateDmy(inv.due_date))]);
   }
   if (pages > 1) meta.push(['Page', `${page} of ${pages}`]);
-  const mid = "<div class='title'>GST INVOICE</div>"
+  const supply = Boolean(inv.bill_of_supply);
+  const mid = `<div class='title'>${supply ? BILL_OF_SUPPLY_TITLE : 'GST INVOICE'}</div>`
     + `<div class='pay'>(${e(inv.pay_label || 'CREDIT')})</div>`
     + `<table class='meta'>${meta.map(([k, v]) => `<tr><td>${k}</td><td>:</td><td class='b'>${v}</td></tr>`).join('')}</table>`;
 
@@ -313,7 +355,10 @@ function box(inv, entries, page, pages, copyLabel) {
   if (last) {
     const bank = bankLines(shop);
     const bankHtml = bank.length ? `<div class='cap'>BANK DETAILS</div>${bank.map((b) => `<div class='line'>${b}</div>`).join('')}` : '';
-    footLeft = `${gstTable(inv)}<div class='words'>${e(words(inv))}</div><div class='decl'>${e(inv.declaration || '')}</div>`;
+    const taxBlock = supply
+      ? (inv.supply_declaration ? `<div class='supply-decl' style='font-weight:700;font-size:8pt;text-align:center;padding:2mm 1.2mm'>${e(inv.supply_declaration)}</div>` : '')
+      : gstTable(inv);
+    footLeft = `${taxBlock}<div class='words'>${e(words(inv))}</div><div class='decl'>${e(inv.declaration || '')}</div>`;
     footMid = `<div class='line'>Total Item / Quantity : ${Math.trunc(f(inv.total_items))} / ${qty(inv.total_qty) || 0}</div>`
       + `${bankHtml}<div class='ledger'>LEDGER BAL. : ${ledger(inv)}</div>`;
     footRight = totals(inv);
@@ -450,8 +495,9 @@ export function renderWholesaleInvoicesHtml(invs, { paper = 'A5', copyLabel = ''
     sheets.push(`<div class='sheet'>${halves}${cut}</div>`);
   }
   const title = invs.slice(0, 3).map((inv) => String(inv.bill_no || '')).join(' ');
+  const docTitle = invs.length && invs.every((inv) => inv.bill_of_supply) ? BILL_OF_SUPPLY_TITLE : 'GST INVOICE';
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>GST INVOICE ${e(title)}</title>
+<html><head><meta charset="utf-8"><title>${docTitle} ${e(title)}</title>
 <style>${css(p)}</style></head>
 <body class="paper-${p.toLowerCase()}">
 ${sheets.join('')}

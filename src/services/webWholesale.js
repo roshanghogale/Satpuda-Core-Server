@@ -23,6 +23,7 @@ import {
 } from './webStore.js';
 import * as W from './wholesaleSale.js';
 import { billReturnRows, renderWholesaleInvoiceHtml } from './wholesaleInvoice.js';
+import { HEADING_KV, REASON_KV, billHeadingInfo } from './billHeading.js';
 import { displaySalesBillNo } from '../utils/fy.js';
 
 const r2 = (x) => pyRound(Number(x) || 0, 2);
@@ -92,7 +93,7 @@ export async function shopProfile(storePk) {
   const [{ rows }, kv] = await Promise.all([
     query(`SELECT name, address, phone, email, gstin, dl_number FROM pharmacy_profiles WHERE store_pk=$1`, [storePk]),
     settingRows(storePk, { names: ['profile_bank_name', 'profile_bank_account_no', 'profile_bank_ifsc', 'profile_bank_branch',
-      'invoice_bank_details', 'invoice_declaration', 'bill_signature_image'] }),
+      'invoice_bank_details', 'invoice_declaration', 'bill_signature_image', HEADING_KV, REASON_KV] }),
   ]);
   const p = rows[0] || {};
   const gstin = String(p.gstin || '').trim().toUpperCase();
@@ -115,6 +116,8 @@ export async function shopProfile(storePk) {
     gstin, dl_numbers: String(p.dl_number || ''), state, state_name: W.stateName(state), bank,
     declaration: String(kv.get('invoice_declaration') ?? ''),
     signature: String(kv.get('bill_signature_image') ?? ''),
+    // Tax Invoice or Bill of Supply (services/billHeading.js).
+    ...billHeadingInfo(kv.get(HEADING_KV), kv.get(REASON_KV)),
   };
 }
 
@@ -687,6 +690,8 @@ export async function invoiceContext(storePk, id, { signatureLook } = {}) {
     total_qty: lines.reduce((s, l) => s + (Number(l.qty) || 0), 0),
     declaration: W.declarationText(shop.declaration, shop.address),
     signature_src: signature,
+    bill_of_supply: shop.bill_of_supply,
+    supply_declaration: shop.supply_declaration,
   };
   if (signatureLook) ctx.signature_look = signatureLook;
   return ctx;

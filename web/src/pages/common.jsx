@@ -133,6 +133,9 @@ export function BillPrint({ sale, profile }) {
   const items = sale.items || [];
   const rets = sale.returns_in_bill || [];
   const retTotal = Math.round(rets.reduce((s, r) => s + Number(r.amount || 0), 0) * 100) / 100;
+  // Bill of Supply (the shop's "Bill heading" setting, owner 22 Oct 2026): titled so, no GST
+  // line, and a composition dealer's declaration. The amounts are the same.
+  const supply = Boolean(profile?.bill_of_supply);
   return (
     <div className="bill-print">
       <div className="bp-head">
@@ -143,6 +146,8 @@ export function BillPrint({ sale, profile }) {
           {profile?.gstin ? ` · GSTIN: ${profile.gstin}` : ''}
           {profile?.dl_number ? ` · DL: ${profile.dl_number}` : ''}
         </div>
+        {supply && <div className="bp-title">BILL OF SUPPLY</div>}
+        {supply && profile?.supply_declaration ? <div className="bp-decl">{profile.supply_declaration}</div> : null}
       </div>
       <div className="bp-meta">
         <div>Bill No: <strong>{shortNo(sale.bill_no)}</strong></div>
@@ -174,7 +179,7 @@ export function BillPrint({ sale, profile }) {
         {retTotal > 0 && <div>Return total: − ₹ {money(retTotal)}</div>}
         {retTotal > 0 && <div className="bp-total">Net to pay: ₹ {money(Number(sale.total_amount) - retTotal)}</div>}
         <div>Paid: {money(sale.amount_paid)}{Number(sale.due_amount) > 0 ? ` · Due: ${money(sale.due_amount)}` : ''}</div>
-        <div className="muted small">GST included in MRP</div>
+        {!supply && <div className="muted small">GST included in MRP</div>}
       </div>
     </div>
   );
