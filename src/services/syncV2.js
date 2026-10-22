@@ -241,7 +241,8 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
       if (!deleteBase) {
         return { outcome: 'flagged', flag_code: 'delete_missing', flag_detail: 'nothing on the server to delete' };
       }
-      doc = { ...deleteBase, ...doc, deleted: true };
+      // The stored copy names whoever wrote it last; the delete is THIS device's write.
+      doc = { ...deleteBase, ...doc, deleted: true, device_id: doc.device_id || device.install_id };
     }
     const localId = ev.local_id;
     if (!Number.isFinite(localId) || localId <= 0) {
@@ -444,8 +445,17 @@ export async function applyServerSideSave(storePk, { installId, deviceType = 'we
     const results = [];
     for (const raw of events) {
       last += 1;
+      // A web edit is built over the stored row ({ ...old, ... }), which names the device that
+      // wrote the bill last. Left in, applyEvent kept that device as the writer of the web's
+      // change: the change log and the hint said the PC or phone made it (so that device took
+      // it for its own echo), and the clash check never saw that device's later stale copy as
+      // a clash. The web device is the writer of everything it saves.
+      const doc = raw.doc && typeof raw.doc === 'object' && !Array.isArray(raw.doc)
+        ? { ...raw.doc } : raw.doc;
+      if (doc && typeof doc === 'object' && !Array.isArray(doc)) delete doc.device_id;
       const ev = normalizeEvent({
         ...raw,
+        doc,
         seq: last,
         event_uuid: raw.event_uuid || `${installId}:${last}:${Date.now().toString(36)}`,
         device_time: new Date().toISOString(),
