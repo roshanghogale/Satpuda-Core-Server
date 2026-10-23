@@ -3,6 +3,7 @@
  * Always filtered by store_pk from JWT.
  */
 import { query } from '../db/pool.js';
+import { PURCHASE_ENTRY_PAID_SQL } from './partyDueCascade.js';
 import { fyStartYearForDate, fyDateBounds } from '../utils/fy.js';
 import { saleLineProfit, stockValueAtMrp } from '../utils/saleProfit.js';
 import { istToday } from './licenseService.js';
@@ -264,7 +265,7 @@ export async function purchasesSummary(storePk, { from, to, q, ids, scoped } = {
       ? query(
           `SELECT COUNT(*)::int AS bills,
                   COALESCE(SUM(COALESCE(final_amount, total_amount, 0)),0)::float AS final_amount,
-                  COALESCE(SUM(COALESCE(amount_paid_at_entry, amount_paid, 0)),0)::float AS entry_paid,
+                  COALESCE(SUM(${PURCHASE_ENTRY_PAID_SQL}),0)::float AS entry_paid,
                   COALESCE(SUM(item_count),0)::int AS items
            FROM purchases
            WHERE store_pk=$1 AND local_id = ANY($2::bigint[])

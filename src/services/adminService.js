@@ -1,4 +1,5 @@
 import { query, withTransaction } from '../db/pool.js';
+import { PURCHASE_ENTRY_PAID_SQL } from './partyDueCascade.js';
 import { AppError } from '../utils/http.js';
 import {
   parseVoiceTier,
@@ -782,7 +783,9 @@ async function purchasesRangeSummary(where, filterParams) {
   const { rows } = await query(
     `WITH f AS (
        SELECT id, local_id, final_amount, total_amount, total_gst, overall_discount,
-              amount_paid, due_amount, total_due
+              -- Paid at entry (the supplier's due rule): 295 live purchases carry
+              -- amount_paid 0 with cash / online at entry filled (22 Oct 2026).
+              (${PURCHASE_ENTRY_PAID_SQL}) AS amount_paid, due_amount, total_due
          FROM purchases WHERE ${where}
      ),
      _ret AS (

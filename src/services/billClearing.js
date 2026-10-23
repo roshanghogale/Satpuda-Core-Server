@@ -45,8 +45,9 @@ export function cleanAllocations(raw) {
 /**
  * bills:   [{id, date, total, paid}] -- any order; cleared oldest (date, id) first.
  * credits: [{kind, id, date, amount, allocations}] -- payments and returns.
- * overpayJoins: true for sales (a counter overpayment on one bill pays older ones),
- *               false for purchases (as before).
+ * overpayJoins: a counter / entry overpayment on one bill pays the party's other bills.
+ *               True for sales and, since 23 Oct 2026, for purchases too (the supplier's
+ *               due always counted that money; false is kept for the shared vectors).
  */
 export function clearBills(bills, credits, { overpayJoins = true } = {}) {
   const ordered = [...bills].sort(byDateThenId);
