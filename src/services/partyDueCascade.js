@@ -44,6 +44,18 @@ async function partyCredits(client, storePk, kind, partyId) {
   ];
 }
 
+/**
+ * A party's due / credit from its net (billed - paid at entry - payments - returns).
+ * A paisa either way is nothing: the bill rule (clearBills) calls a bill owing 0.01 cleared,
+ * so a party owing 0.01 showed a due with no open bill (store 4, 22 Oct 2026: a 441.01
+ * purchase paid 441).
+ */
+export function partyBalance(rawNet) {
+  const net = r2(rawNet);
+  if (Math.abs(net) <= 0.01) return { totalDue: 0, totalCredit: 0 };
+  return net > 0 ? { totalDue: net, totalCredit: 0 } : { totalDue: 0, totalCredit: r2(-net) };
+}
+
 function asBills(rows, dateCol) {
   return rows.map((b) => ({
     id: Number(b.local_id), date: b[dateCol], total: Number(b.total_amount), paid: Number(b.amount_paid),
@@ -72,7 +84,7 @@ export async function partyBillClearing(client, storePk, kind, partyLocalId) {
       [storePk, pid],
     )).rows;
   const credits = await partyCredits(client, storePk, kind, pid);
-  const res = clearBills(asBills(bills, 'bill_date'), credits, { overpayJoins: kind === 'customer' });
+  const res = clearBills(asBills(bills, 'bill_date'), credits, { overpayJoins: true });
   // rows: the bills as read; remaining: the rule's answer per bill; applied: who paid what.
   return { rows: bills, credits, remaining: res.bills, applied: res.applied };
 }
@@ -107,9 +119,7 @@ export async function cascadeCustomerAfterLedgerChange(
   const totalPaidAt = Number(sums[0]?.paid || 0);
   const paySum = Number(sums[0]?.payments || 0);
   const retSum = Number(sums[0]?.returns || 0);
-  const net = r2(totalBilled - totalPaidAt - paySum - retSum);
-  const totalDue = net > 0 ? net : 0;
-  const totalCredit = net < 0 ? Math.abs(net) : 0;
+  const { totalDue, totalCredit } = partyBalance(totalBilled - totalPaidAt - paySum - retSum);
 
   const { rowCount: partyRows } = await client.query(
     `UPDATE customers SET total_due=$3, total_credit=$4, updated_at=NOW(),
@@ -211,9 +221,7 @@ export async function cascadeSupplierAfterLedgerChange(
   const totalPaidAt = Number(sums[0]?.paid || 0);
   const paySum = Number(sums[0]?.payments || 0);
   const retSum = Number(sums[0]?.returns || 0);
-  const net = r2(totalPurch - totalPaidAt - paySum - retSum);
-  const totalDue = net > 0 ? net : 0;
-  const totalCredit = net < 0 ? Math.abs(net) : 0;
+  const { totalDue, totalCredit } = partyBalance(totalPurch - totalPaidAt - paySum - retSum);
 
   const { rowCount: partyRows } = await client.query(
     `UPDATE suppliers SET total_due=$3, total_credit=$4, updated_at=NOW(),
@@ -241,7 +249,11 @@ export async function cascadeSupplierAfterLedgerChange(
   );
 
   const credits = await partyCredits(client, storePk, 'supplier', sid);
-  const fifo = clearBills(asBills(purchases, 'purchase_date'), credits, { overpayJoins: false }).bills;
+  // A purchase paid past its own total at entry paid the supplier's older purchases (the
+  // purchase screen asks for bill + previous due), as a sale does. With overpayJoins false the
+  // supplier's due (the net above) counted that money but no bill did: 22 Oct 2026, stores
+  // 127/132/139/148 had open purchases summing more than the supplier owed.
+  const fifo = clearBills(asBills(purchases, 'purchase_date'), credits, { overpayJoins: true }).bills;
   const byId = new Map(purchases.map((s) => [Number(s.local_id), s]));
   const dirtyIds = [];
   const dirtyRem = [];
