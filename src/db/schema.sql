@@ -915,3 +915,17 @@ ALTER TABLE sales_items ADD COLUMN IF NOT EXISTS extra_fields JSONB;
 ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS extra_fields JSONB;
 ALTER TABLE customer_payments ADD COLUMN IF NOT EXISTS extra_fields JSONB;
 ALTER TABLE supplier_payments ADD COLUMN IF NOT EXISTS extra_fields JSONB;
+
+-- Doctor margin rules history (owner, 23 Oct 2026): every value the store setting
+-- doctor_margin_rules took, so the web / phone report works each bill out with the rules
+-- in force when it was saved, as the PC does (services/doctorMarginHistory.js; that file
+-- also creates the table on first use, so a server started without this migration works).
+CREATE TABLE IF NOT EXISTS doctor_margin_rules_history (
+  id            BIGSERIAL PRIMARY KEY,
+  store_pk      INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  value         TEXT NOT NULL DEFAULT '',
+  rules_updated TEXT NOT NULL DEFAULT '',
+  effective_at  TIMESTAMPTZ NOT NULL,
+  saved_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_dm_rules_history_store ON doctor_margin_rules_history (store_pk, id);

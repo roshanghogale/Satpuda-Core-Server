@@ -161,6 +161,67 @@ input.num { width: 72px; text-align: right; padding: 4px 6px; }
 tr.dm-loss td { color: #b91c1c; }
 @media print { .wide-modal { max-width: none; } .dm-scroll { overflow: visible; } .dm-report table { font-size: 10px; } }
 
+/* Doctor margin by rules (owner, 22-23 Oct 2026): the report's two layouts and the rules screen. */
+.dmr-mode { margin-bottom: 10px; }
+.dmr-find { width: 180px; }
+.dmr-confirm { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 10px; margin: 8px 0; border-radius: 6px;
+  border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.dmr-hint { font-size: 12px; color: var(--muted); margin: 6px 0; }
+.dmr-total-tile { border-color: var(--accent) !important; }
+.dmr-total-tile b { color: var(--accent); }
+.dmr-flag { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 10px; margin-left: 4px; white-space: nowrap;
+  background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); }
+.dmr-flag-no_rate, .dmr-flag-rate_over_mrp { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.dmr-flag-notes { margin: 6px 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.dmr-doctor { margin: 12px 0; }
+.dmr-doctor-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; border-bottom: 2px solid var(--accent); padding: 4px 0; }
+.dmr-doctor-head b { font-size: 15px; }
+.dmr-doctor-total { margin-left: auto; font-weight: 700; }
+tr.dmr-sum td { font-weight: 700; border-top: 1.5px solid var(--text); }
+tr.dmr-grand-row td { font-size: 15px; }
+tr.dmr-product td { font-weight: 700; color: var(--accent); padding-top: 10px; border-bottom: 1px solid var(--accent); }
+.dmr-grand { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 12px; margin-top: 8px; border-radius: 8px;
+  background: var(--hi); font-weight: 700; }
+.dmr-grand b { font-size: 18px; color: var(--accent); }
+.modal-back.dmr-top { z-index: 60; }
+.modal-back.dmr-top2 { z-index: 70; }
+.dmr-editor { max-width: 1240px; }
+.dmr-editor-body { display: grid; grid-template-columns: 210px minmax(0, 1.1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.dmr-sets { display: flex; flex-direction: column; gap: 6px; }
+.dmr-set { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 7px 10px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.dmr-set.on { border-color: var(--accent); background: var(--hi); }
+.dmr-add-doctor { display: flex; gap: 6px; margin-top: 6px; }
+.dmr-types-table, .dmr-picker-table { max-height: 56vh; overflow: auto; }
+.dmr-types-table tr { cursor: pointer; }
+.dmr-types-table tr.dmr-on td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.dmr-types-table select { width: auto; }
+.dmr-margin { display: inline-flex; gap: 6px; align-items: center; }
+.dmr-margin select { width: auto; }
+.dmr-groups { border-left: 1px solid var(--line); padding-left: 12px; }
+.dmr-group { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin: 8px 0; }
+.dmr-group-name { width: 150px; }
+.dmr-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.dmr-item { display: inline-flex; align-items: center; gap: 4px; background: var(--hi); border-radius: 12px; padding: 2px 4px 2px 10px; font-size: 12px; }
+.dmr-item button { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 14px; }
+.dmr-rest { margin-top: 8px; }
+.dmr-picker-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 12px; align-items: start; margin-top: 8px; }
+.dmr-picker-left { display: flex; flex-direction: column; gap: 6px; }
+.dmr-picker-side { border-left: 1px solid var(--line); padding-left: 12px; }
+.dmr-picker-side h4 { margin: 10px 0 4px; }
+.dmr-tick { width: 52px; }
+.dmr-tick input { width: auto; }
+tr.dmr-ticked td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.dmr-batches { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+@media (max-width: 900px) {
+  .dmr-editor-body, .dmr-picker-body { grid-template-columns: 1fr; }
+  .dmr-groups, .dmr-picker-side { border-left: none; padding-left: 0; }
+}
+@media print {
+  .dmr-doctor { break-inside: avoid-page; }
+  .dmr-flag { border: 1px solid currentColor; }
+}
+
 /* Retail | Wholesale (owner, 18 Oct 2026): the wholesale store is a separate store. */
 .store-switch { display: flex; align-items: center; gap: 8px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }

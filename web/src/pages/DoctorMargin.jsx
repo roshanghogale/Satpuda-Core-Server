@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, fmtDate, money, qs, todayIso } from '../api.js';
 import { printNow } from './common.jsx';
+import { DoctorMarginByRules } from './DoctorMarginRules.jsx';
 
 /**
- * Doctor Margin Report (owner, 17 Oct 2026; Sales History -> Export). The figures come from
- * the server's doctorMargin.js, the same rule as the PC and the phone.
+ * Doctor Margin Report (owner, 17 Oct 2026; Sales History -> Export). Three modes, as on the
+ * PC: By margin rules (22 Oct 2026, the default; DoctorMarginRules.jsx), Regular medicine %
+ * and Injection profit (the server's doctorMargin.js, the same rule as the PC and the phone).
  */
 const isInj = (t) => String(t || '').toLowerCase().includes('inj');
 const PCT_KEY = 'satpuda_doctor_pct';
@@ -18,12 +20,12 @@ function csvCell(v) {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-export default function DoctorMargin({ from: from0, to: to0, onClose }) {
+export default function DoctorMargin({ from: from0, to: to0, onClose, canEdit = false }) {
   const [from, setFrom] = useState(from0 || todayIso());
   const [to, setTo] = useState(to0 || todayIso());
   const [opts, setOpts] = useState(null);
   const [doctor, setDoctor] = useState('');
-  const [mode, setMode] = useState('regular');
+  const [mode, setMode] = useState('rules');
   const [pct, setPct] = useState(readPct());
   const [style, setStyle] = useState('detailed');
   const [picked, setPicked] = useState(null);
@@ -36,6 +38,26 @@ export default function DoctorMargin({ from: from0, to: to0, onClose }) {
   const types = useMemo(() => (opts?.types || []).filter((t) => (mode === 'injection' ? isInj(t) : !isInj(t))), [opts, mode]);
   useEffect(() => { setPicked(null); }, [mode]);
   const chosen = picked ?? types;
+
+  const modeSwitch = (
+    <div className="row wrap dmr-mode">
+      <span className="muted small">Report mode</span>
+      <div className="seg" role="radiogroup" aria-label="Report mode">
+        <button role="radio" aria-checked={mode === 'rules'} className={mode === 'rules' ? 'on' : ''} onClick={() => setMode('rules')}>By margin rules</button>
+        <button role="radio" aria-checked={mode === 'regular'} className={mode === 'regular' ? 'on' : ''} onClick={() => setMode('regular')}>Regular medicine %</button>
+        <button role="radio" aria-checked={mode === 'injection'} className={mode === 'injection' ? 'on' : ''} onClick={() => setMode('injection')}>Injection profit</button>
+      </div>
+    </div>
+  );
+  if (mode === 'rules') {
+    return (
+      <div className="modal-back" onClick={onClose}>
+        <div className="modal wide-modal" onClick={(e) => e.stopPropagation()}>
+          <DoctorMarginByRules from={from} to={to} setFrom={setFrom} setTo={setTo} canEdit={canEdit} onClose={onClose} modeSwitch={modeSwitch} />
+        </div>
+      </div>
+    );
+  }
 
   function quick(kind) {
     const now = new Date();
@@ -105,6 +127,7 @@ export default function DoctorMargin({ from: from0, to: to0, onClose }) {
       <div className="modal wide-modal" onClick={(e) => e.stopPropagation()}>
         <div className="no-print">
           <h3>Doctor Margin Report</h3>
+          {modeSwitch}
           <div className="row wrap">
             <label>From<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
             <label>To<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
@@ -116,10 +139,6 @@ export default function DoctorMargin({ from: from0, to: to0, onClose }) {
             <label>Doctor<select value={doctor} onChange={(e) => setDoctor(e.target.value)}>
               <option value="">All doctors</option>
               {(opts?.doctors || []).map((d) => <option key={d} value={d}>{d}</option>)}
-            </select></label>
-            <label>Report<select value={mode} onChange={(e) => setMode(e.target.value)}>
-              <option value="regular">Regular medicine report</option>
-              <option value="injection">Injection report</option>
             </select></label>
             {mode === 'regular' && <label>Doctor commission (%)<input className="num" value={pct} onChange={(e) => setPct(e.target.value)} /></label>}
             <label>Style<select value={style} onChange={(e) => setStyle(e.target.value)}>

@@ -8,6 +8,7 @@ import { asyncHandler, ok, AppError, trustedClientIp } from '../utils/http.js';
 import * as users from '../services/webUsers.js';
 import * as store from '../services/webStore.js';
 import * as ws from '../services/webWholesale.js';
+import * as dmRules from '../services/doctorMarginRulesStore.js';
 import { assertStoreAccess } from '../services/licenseService.js';
 import { companionOffered, findCompanion, storeKindOf } from '../services/wholesaleStore.js';
 import { query } from '../db/pool.js';
@@ -256,6 +257,24 @@ router.get('/reports/doctor-margin/options', needAny('sales_view', 'reports'), a
 }));
 router.get('/reports/doctor-margin', needAny('sales_view', 'reports'), asyncHandler(async (req, res) => {
   ok(res, await store.doctorMarginReport(req.web.storePk, req.query));
+}));
+// Doctor margin BY RULES (owner, 22-23 Oct 2026; the PC's "By margin rules" mode): the rules
+// (a shop setting every PC and phone shares), the product pick list, the report and the
+// owner's Recalculate period. Seeing needs what the report needs; changing needs Reports.
+router.get('/reports/doctor-margin/rules', needAny('sales_view', 'reports'), asyncHandler(async (req, res) => {
+  ok(res, await dmRules.rulesPayload(req.web.storePk));
+}));
+router.put('/reports/doctor-margin/rules', need('reports'), asyncHandler(async (req, res) => {
+  ok(res, await dmRules.saveRules(...W(req), req.body || {}));
+}));
+router.get('/reports/doctor-margin/rules/products', needAny('sales_view', 'reports'), asyncHandler(async (req, res) => {
+  ok(res, await dmRules.ruleProducts(req.web.storePk, req.query));
+}));
+router.get('/reports/doctor-margin/by-rules', needAny('sales_view', 'reports'), asyncHandler(async (req, res) => {
+  ok(res, await dmRules.report(req.web.storePk, req.query));
+}));
+router.post('/reports/doctor-margin/recalculate', need('reports'), asyncHandler(async (req, res) => {
+  ok(res, await dmRules.recalculate(...W(req), req.body || {}));
 }));
 router.get('/payments/report', need('parties'), asyncHandler(async (req, res) => {
   ok(res, await store.paymentReport(req.web.storePk, req.query));
