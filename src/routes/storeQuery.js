@@ -11,6 +11,7 @@ import { boolOrNull } from '../services/adminFilters.js';
 import { query } from '../db/pool.js';
 import { inventoryCounts } from '../services/webStore.js';
 import { withDocExtras } from '../services/docExtras.js';
+import * as dmRules from '../services/doctorMarginRulesStore.js';
 
 const router = Router();
 router.use(requireStore);
@@ -156,6 +157,16 @@ router.get('/inventory', asyncHandler(async (req, res) => {
 /** Store parties — same rows Offline SQLite uses for Sales/Purchase dropdowns. */
 router.get('/customers', asyncHandler(async (req, res) => {
   ok(res, await admin.listCustomers(await storePk(req), shopListOptions(req)));
+}));
+
+/**
+ * Doctor Margin Report BY RULES for a paired device (the phone, Online): exactly the web's
+ * /api/web/reports/doctor-margin/by-rules -- the same service, so the store's full rules history
+ * and the PC's Recalculate runs decide each bill's rules. ?from&to&doctors (comma list)&rate_basis&view.
+ * Read only.
+ */
+router.get('/reports/doctor-margin/by-rules', asyncHandler(async (req, res) => {
+  ok(res, await dmRules.report(await storePk(req), req.query));
 }));
 
 router.get('/doctors', asyncHandler(async (req, res) => {
