@@ -7,6 +7,7 @@
 //   node test/web-doctor-margin-rules-rehearsal.test.mjs
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
+import { r2 } from '../src/services/doctorMarginRules.js';
 
 const BASE = process.env.WEB_TEST_BASE || 'http://127.0.0.1:3999';
 if (!/^http:\/\/127\.0\.0\.1:3999$/.test(BASE)) throw new Error('Rehearsal only: WEB_TEST_BASE must be http://127.0.0.1:3999');
@@ -69,7 +70,7 @@ assert.equal(inj.stock_qty, 15);
 assert.equal(tab.stock_qty, 20);
 step(`purchase ${pur.purchase_no}: ${INJ} 10 + 5 free at Rs 10, ${TAB} 2 strips of 10 at Rs 50`);
 
-// ── the rules: owner only ────────────────────────────────────────────────────
+// ── the rules: owner only (a version 1 value, as a PC of 22 Oct sends it: read as version 2) ──
 const v1 = { rate_basis: 'purchase_free', sets: [{ doctor: '', types: [
   { type: 'Injection', mode: 'groups', rest: null, groups: [{ name: 'Own', margin: { kind: 'mrp_rate' }, items: [{ product: INJ.toLowerCase() }] }] },
   { type: 'Tablet', mode: 'type', margin: { kind: 'fixed', value: 1 } },
@@ -81,6 +82,9 @@ assert.equal(bad.status, 400);
 assert.equal(bad.error, 'A % of MRP margin must be 0 to 100.');
 const saved1 = await okCall('PUT', '/api/web/reports/doctor-margin/rules', { token: owner, body: { rules: v1 } });
 assert.equal(saved1.rules.sets[0].types[0].groups[0].items[0].product, INJ, 'kept in the one shape (upper case)');
+assert.equal(saved1.rules.version, 2, 'always written as version 2');
+assert.deepEqual(saved1.rules.sets[0].types[1], { type: 'Tablet', mode: 'groups', groups: [
+  { name: 'All Tablet', margin: { kind: 'fixed', value: 1 }, all: true, items: [] }] }, 'v1 whole type = one All-products group');
 assert.match(saved1.rules.updated, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/);
 const seen = await okCall('GET', '/api/web/reports/doctor-margin/rules', { token: staff });
 assert.equal(seen.rules.updated, saved1.rules.updated, 'staff may see the rules');
@@ -107,6 +111,8 @@ const tabRow = r.rows.find((x) => x.name === TAB);
 assert.deepEqual([tabRow.qty, tabRow.mrp, tabRow.rate, tabRow.margin_unit, tabRow.value], [10, 10, 5, 1, 10]);
 assert.deepEqual(r.totals, { qty: 13, value: 189.92, lines: 2 });
 assert.deepEqual(r.doctors.map((d) => [d.doctor, d.value]), [[DOC, 189.92]]);
+assert.deepEqual(r.sales.rows, [], 'no type on total sales yet');
+assert.deepEqual(r.grand.totals, { profit: 189.92, sales_value: 0, commission: 0, total: 189.92 });
 assert.equal(r.products.length, 2);
 const asBilled = await rep({ rate_basis: 'purchase' });
 assert.equal(asBilled.rows.find((x) => x.name === INJ).value, 169.92, '(66.64 - 10) x 3: the rate choice');
@@ -156,6 +162,49 @@ const det = await rep({ view: 'detail', rate_basis: 'purchase_free' });
 assert.equal(det.filters.view, 'detail');
 assert.deepEqual(det.products.map((p) => [p.name, p.value]), [[INJ, 14]]);
 step('customer-wise product-batch layout: one product, sub-total = TOTAL');
+
+// ── rules version 2: on profit (an All-products group) and on total sales (a %) ──
+const badPct = await call('PUT', '/api/web/reports/doctor-margin/rules', { token: owner, body: { rules: { sets: [{ doctor: '', sales_pct: 140, types: [] }] } } });
+assert.equal(badPct.status, 400);
+assert.equal(badPct.error, 'A % of total sales must be 0 to 100.');
+await wait(1200);
+const two = await okCall('PUT', '/api/web/reports/doctor-margin/rules', { token: owner, body: { rules: { version: 2, rate_basis: 'purchase', sets: [
+  { doctor: '', sales_pct: 10, types: [
+    { type: 'Injection', mode: 'groups', groups: [{ name: 'All injections', all: true, margin: { kind: 'fixed', value: 3 }, items: [] }] },
+    { type: 'Tablet', mode: 'sales' }] },
+  { doctor: DOC.toLowerCase(), sales_pct: 12.5, types: [] },
+] } } });
+assert.deepEqual(two.rules.sets.map((x) => [x.doctor, x.sales_pct]), [['', 10], [DOC, 12.5]]);
+assert.equal(two.has_rules, true);
+await wait(1200);
+const s4 = await okCall('POST', '/api/web/sales', { token: staff, body: {
+  customer_name: `DM PATIENT4 ${tag}`, doctor_name: DOC, items: [{ medicine_id: inj.id, qty: 2 }, { medicine_id: tab.id, qty: 4, disc_pct: 10 }], cash_paid: 0 } });
+const s4Bill = await okCall('GET', `/api/web/sales/${s4.sale.id}`, { token: owner });
+const tabLine = s4Bill.items.find((i) => i.medicine_id === tab.id);
+assert.ok(tabLine.amount > 0 && tabLine.amount < 40, `the tablet line's amount, its 10% discount off (${tabLine.amount})`);
+r = await rep();
+const s4No = s4.bill_no.split('/FY')[0];
+assert.deepEqual(r.rows.filter((x) => x.bill_no === s4No).map((x) => [x.name, x.qty, x.margin_unit, x.value, x.rule]),
+  [[INJ, 2, 3, 6, 'Injection > All injections']], 'on profit: the All-products group');
+assert.equal(r.totals.value, 20, 'the earlier bills as they were (14) + 2 x 3');
+assert.deepEqual(r.sales.rows.map((x) => [x.bill_no, x.name, x.qty, x.sale_rate, x.disc, x.value, x.kind_value, x.pack]),
+  [[s4No, TAB, 4, tabLine.rate, r2(tabLine.item_discount), r2(tabLine.amount), 12.5, '10']], 'on total sales: the line as billed');
+let sd = r.sales.doctors[0];
+assert.deepEqual(sd.by_pct, [{ pct: 12.5, value: r2(tabLine.amount), commission: r2(r2(tabLine.amount) * 12.5 / 100) }]);
+assert.deepEqual(sd.products.map((p) => [p.name, p.pack, p.qty, p.value]), [[TAB, '10', 4, r2(tabLine.amount)]]);
+assert.deepEqual(r.grand.doctors, [{ doctor: DOC, profit: 20, sales_value: r2(tabLine.amount), commission: sd.commission, total: r2(20 + sd.commission) }]);
+step(`rules v2: bill ${s4.bill_no} injection on profit (All products, Rs 3 x 2) + tablets on total sales ${r2(tabLine.amount)} at the doctor's 12.5% = ${sd.commission}; doctor's margin ${r.grand.totals.total}`);
+
+await okCall('POST', '/api/web/returns/sales', { token: owner, body: { sale_id: s4.sale.id, items: [{ medicine_id: tab.id, qty: 1 }], settle_mode: 'ledger' } });
+r = await rep();
+const net = r2((tabLine.amount * 3) / 4);
+assert.deepEqual(r.sales.rows.map((x) => [x.qty, x.qty_returned, x.value]), [[3, 1, net]], 'the return takes its share off');
+sd = r.sales.doctors[0];
+assert.equal(sd.commission, r2(net * 12.5 / 100));
+assert.equal(r.grand.totals.total, r2(20 + sd.commission));
+const freeRate = await rep({ rate_basis: 'purchase_free' });
+assert.deepEqual(freeRate.sales, r.sales, 'the rate choice never touches the total-sales part');
+step(`a return of 1 tablet: sale value ${net}, commission ${sd.commission}`);
 
 // put the store's rules back as they were
 await okCall('PUT', '/api/web/reports/doctor-margin/rules', { token: owner, body: { rules: before.rules } });

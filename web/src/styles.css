@@ -204,7 +204,24 @@ tr.dmr-product td { font-weight: 700; color: var(--accent); padding-top: 10px; b
 .dmr-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .dmr-item { display: inline-flex; align-items: center; gap: 4px; background: var(--hi); border-radius: 12px; padding: 2px 4px 2px 10px; font-size: 12px; }
 .dmr-item button { border: none; background: none; cursor: pointer; color: var(--muted); font-size: 14px; }
-.dmr-rest { margin-top: 8px; }
+.dmr-part { margin: 8px 0 4px; }
+.dmr-part-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin: 6px 0 2px; }
+tr.dmr-sub td { font-weight: 600; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+tr.dmr-commission td { color: var(--accent); }
+.dmr-pack { font-weight: 400; color: var(--muted); }
+.dmr-doctor-margin { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin: 6px 0 2px; padding: 6px 8px;
+  border-top: 1.5px solid var(--text); border-bottom: 1.5px solid var(--text); font-weight: 600; }
+.dmr-doctor-margin b { font-size: 16px; color: var(--accent); }
+.dmr-all-doctors { margin-top: 10px; }
+.dmr-pct .num { width: 90px; }
+.dmr-ways { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0 8px; }
+.dmr-way { display: flex; flex-direction: column; gap: 2px; border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; color: var(--muted); }
+.dmr-way b { color: var(--text); font-size: 13px; }
+.dmr-way.on { border-color: var(--accent); background: var(--hi); }
+.dmr-sales-tag { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 10px; background: var(--hi); color: var(--accent); font-weight: 600; }
+.dmr-sales-panel { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.dmr-all { white-space: nowrap; }
+.dmr-all input { width: auto; }
 .dmr-picker-body { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 12px; align-items: start; margin-top: 8px; }
 .dmr-picker-left { display: flex; flex-direction: column; gap: 6px; }
 .dmr-picker-side { border-left: 1px solid var(--line); padding-left: 12px; }
@@ -214,7 +231,7 @@ tr.dmr-product td { font-weight: 700; color: var(--accent); padding-top: 10px; b
 tr.dmr-ticked td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .dmr-batches { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
 @media (max-width: 900px) {
-  .dmr-editor-body, .dmr-picker-body { grid-template-columns: 1fr; }
+  .dmr-editor-body, .dmr-picker-body, .dmr-ways { grid-template-columns: 1fr; }
   .dmr-groups, .dmr-picker-side { border-left: none; padding-left: 0; }
 }
 @media print {
