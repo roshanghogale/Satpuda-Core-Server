@@ -1,6 +1,8 @@
 // Doctor margin by RULES: the server's port against vectors made by RUNNING the PC python
 // (scripts/make-doctor-margin-rules-vectors.py -> test/fixtures/doctor_margin_rules_vectors.json),
 // and the rules-history choice (which version, which purchase lines) of doctorMarginHistory.js.
+// Rules version 2 (23 Oct 2026): per type none / on profit (groups only, "All products" groups)
+// / on total sales (a % of the sale value); version 1 still read. Both ways in every vector.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -68,6 +70,20 @@ test('PC parity: sale units of a pack (MRP per tablet) and units a purchased pac
   for (const u of V.units.units_per_pack) {
     assert.equal(R.purchaseUnitsPerPack(u.type, u.unit, u.qty, u.free, 0), u.units, JSON.stringify(u));
   }
+  for (const p of V.units.pack) assert.equal(R.packText(p.unit), p.pack, JSON.stringify(p));
+});
+
+test('the vectors really hold both ways: total-sales lines, All-products groups, a doctor\'s own % and null', () => {
+  const cleaned = V.pure.filter((c) => c.clean).map((c) => c.clean);
+  const types = cleaned.flatMap((r) => r.sets.flatMap((st) => st.types));
+  assert.ok(types.some((t) => t.mode === 'sales'));
+  assert.ok(types.some((t) => t.mode === 'groups' && t.groups.some((g) => g.all)));
+  assert.ok(cleaned.some((r) => r.sets.some((st) => st.doctor && st.sales_pct === null)));
+  assert.ok(cleaned.some((r) => r.sets.some((st) => st.doctor && typeof st.sales_pct === 'number')));
+  assert.ok(V.pure.some((c) => c.runs?.some((run) => run.compute.sales.rows.length && run.compute.grand.totals.commission > 0)));
+  const sd = V.store.reports[0].expect.sales.doctors;
+  assert.ok(sd.some((d) => d.by_pct.length === 2), 'a doctor with bills under two different %');
+  assert.ok(V.store.reports[0].expect.sales.rows.some((r) => r.qty_returned > 0), 'a return on a total-sales line');
 });
 
 // ── a real PC store: rules changed, Recalculate, a later purchase ───────────────────────
@@ -86,7 +102,7 @@ for (const rep of S.reports) {
       && (!want.size || want.has(R.normName(b.doctor_name))));
     const books = shapeBooks(bills, S.items, S.returns, S.purchases);
     const got = computeReport(storeState(), books, fl);
-    for (const k of ['rows', 'summary', 'doctors', 'totals', 'products', 'flag_counts']) {
+    for (const k of ['rows', 'summary', 'doctors', 'totals', 'products', 'flag_counts', 'sales', 'grand']) {
       assert.deepEqual(plain(got[k]), rep.expect[k], k);
     }
   });
@@ -95,14 +111,58 @@ for (const rep of S.reports) {
 test('the store case really exercises each way a bill gets its rules', () => {
   const fl = parseFilters({ from: '2026-10-10', to: '2026-10-20' });
   const got = computeReport(storeState(), shapeBooks(S.bills, S.items, S.returns, S.purchases), fl);
-  assert.deepEqual(got.sync.by, { saved: 4, recalculated: 1, first_rules: 1, none: 0 });
+  assert.deepEqual(got.sync.by, { saved: 5, recalculated: 1, first_rules: 1, none: 0 });
+  // the first version is a version 1 value (a PC of 22 Oct): read as version 2
+  assert.equal(JSON.parse(S.history[0].value).version, 1);
+  assert.equal(buildVersions(S.history, S.current)[0].rules.version, 2);
   // Rules NOT changed (only the latest version) and no Recalculate: the plain PC compute.
   const only = { rules: R.safeRules(S.current.value), versions: buildVersions([], S.current), runs: [] };
   const all = computeReport(only, shapeBooks(S.bills, S.items, S.returns, S.purchases.map((p) => ({ ...p, saved_ms: null }))), fl);
   const sales = shapeBooks(S.bills, S.items, S.returns, S.purchases).sales;
   const plainPc = R.compute(sales, shapeBooks([], [], [], S.purchases).purchases, S.current.value, {});
-  assert.deepEqual(plain(all.rows), plain(plainPc.rows));
+  const noStamp = (rows) => plain(rows).map(({ rules_at: _r, ...r }) => r);
+  assert.ok(all.rows.every((r) => r.rules_at === R.safeRules(S.current.value).updated));
+  assert.deepEqual(noStamp(all.rows), plain(plainPc.rows));
+  assert.deepEqual(noStamp(all.sales.rows), plain(plainPc.sales.rows));
   assert.deepEqual(all.totals, plainPc.totals);
+  assert.deepEqual(all.grand, plainPc.grand);
+});
+
+test('the report (web and the phone route: the same service) carries both ways and the doctor\'s margin', () => {
+  const fl = parseFilters({ from: '2026-10-10', to: '2026-10-20' });
+  const got = computeReport(storeState(), shapeBooks(S.bills, S.items, S.returns, S.purchases), fl);
+  assert.deepEqual(Object.keys(got.grand), ['doctors', 'totals']);
+  assert.deepEqual(Object.keys(got.sales), ['rows', 'doctors', 'totals']);
+  for (const g of got.grand.doctors) {
+    const p = got.doctors.find((d) => d.doctor === g.doctor);
+    const sd = got.sales.doctors.find((d) => d.doctor === g.doctor);
+    assert.equal(g.total, R.r2((p ? p.value : 0) + (sd ? sd.commission : 0)));
+  }
+  assert.ok(got.sales.rows.every((r) => r.way === 'sales' && r.kind === R.SALES_KIND));
+  assert.ok(got.rows.every((r) => r.way === 'profit'));
+  // the rate choice never touches a total-sales line
+  const free = computeReport(storeState(), shapeBooks(S.bills, S.items, S.returns, S.purchases), { ...fl, rate_basis: 'purchase_free' });
+  assert.deepEqual(plain(free.sales), plain(got.sales));
+});
+
+test('a total-sales line: the amount as billed, returns pro rata, commission on the doctor\'s total', () => {
+  const rules = { sets: [{ doctor: '', sales_pct: 10, types: [{ type: 'Syrup', mode: 'sales' }] },
+    { doctor: 'dr x', sales_pct: 12.5, types: [] }, { doctor: 'dr y', sales_pct: null, types: [] }] };
+  const item = (id, qty, amount) => ({ id, medicine_id: 1, name: 'SYR', type: 'syrup', batch: 'B', qty, sale_rate: 30, amount, disc: 0, pack: '100ML' });
+  const sales = [
+    { id: 1, bill_no: 'A', date: '2026-10-12', patient: 'P', doctor: 'Dr X', items: [item(1, 3, 85.5)], returns: [{ medicine_id: 1, qty: 1 }] },
+    { id: 2, bill_no: 'B', date: '2026-10-12', patient: 'P', doctor: 'Dr X', items: [item(2, 1, 0.05), item(3, 1, 0.05)] },
+    { id: 3, bill_no: 'C', date: '2026-10-12', patient: 'P', doctor: 'Dr Y', items: [item(4, 2, 60)] },
+  ];
+  const rep = R.compute(sales, [], rules);
+  assert.equal(rep.rows.length, 0);
+  assert.deepEqual(rep.sales.rows.map((r) => [r.doctor, r.qty, r.value, r.kind_value]),
+    [['DR X', 2, 57, 12.5], ['DR X', 1, 0.05, 12.5], ['DR X', 1, 0.05, 12.5], ['DR Y', 2, 60, 10]]);
+  // 57.10 x 12.5% = 7.1375 -> 7.14 on the total (line by line it would be 7.13 + 0.01 + 0.01)
+  assert.deepEqual(rep.sales.doctors.map((d) => [d.doctor, d.value, d.commission, d.products[0].pack]),
+    [['DR X', 57.1, 7.14, '100ML'], ['DR Y', 60, 6, '100ML']]);
+  assert.deepEqual(rep.grand.totals, { profit: 0, sales_value: 117.1, commission: 13.14, total: 13.14 });
+  assert.equal(R.RECALC_VERSION, 1, 'the Recalculate marker keeps its own version');
 });
 
 // ── the history choice on its own ───────────────────────────────────────────────────────
@@ -122,7 +182,7 @@ test('shop times: a time without a zone is IST; now is written as the PC writes 
 
 const T = (h) => Date.parse(`2026-10-1${h}T00:00:00Z`);
 const rulesV = (updated, margin) => JSON.stringify(R.cleanRules({
-  updated, sets: [{ doctor: '', types: [{ type: 'Tablet', mode: margin ? 'type' : 'none', margin }] }],
+  updated, sets: [{ doctor: '', types: [{ type: 'Tablet', mode: margin ? 'groups' : 'none', groups: [{ all: true, margin }] }] }],
 }));
 
 test('versions: in arrival order, never in force before the one that arrived before', () => {

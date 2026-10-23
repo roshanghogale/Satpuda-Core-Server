@@ -1,6 +1,8 @@
 /**
  * Doctor Margin Report BY RULES on the server (web; the phone reads the same routes) --
- * the PC's core/doctor_margin_rules_report.py over the server's books.
+ * the PC's core/doctor_margin_rules_report.py over the server's books. Per doctor two parts
+ * (rules version 2, 23 Oct 2026): on profit (the top-level rows / summary / doctors / totals)
+ * and on total sales (`sales`), and the doctor's margin = profit + commission (`grand`).
  *
  * The figures are doctorMarginRules.js (the PC's calculation, checked against it); which rules
  * version and which purchase lines count for a bill is doctorMarginHistory.js (the PC freezes
@@ -163,7 +165,7 @@ export async function recalculate(storePk, user, q = {}) {
   try { data = st.recalcRaw ? JSON.parse(st.recalcRaw) : {}; } catch { data = {}; }
   const runs = data && typeof data === 'object' && Array.isArray(data.runs) ? data.runs.filter((r) => r && typeof r === 'object') : [];
   runs.push({ from: fl.from, to: fl.to, at: shopNowText(), rules_updated: st.rules.updated });
-  await saveSetting(storePk, user, R.RECALC_SETTING, JSON.stringify({ version: R.VERSION, runs: runs.slice(-RECALC_KEEP) }),
+  await saveSetting(storePk, user, R.RECALC_SETTING, JSON.stringify({ version: R.RECALC_VERSION, runs: runs.slice(-RECALC_KEEP) }),
     'doctor_margin.recalculate');
   const rep = await report(storePk, q);
   return { ...rep, sync: { ...rep.sync, recalculated: true } };
@@ -241,7 +243,9 @@ async function readBooks(storePk, fl) {
               COALESCE(m.name, si.name, '') AS name, COALESCE(m.type, si.type, '') AS type,
               COALESCE(m.batch_no, si.batch_no, '') AS batch, COALESCE(m.unit, '1') AS unit,
               COALESCE(m.mrp, 0)::float AS mrp, COALESCE(m.rate, 0)::float AS rate,
-              COALESCE(si.qty, 0)::float AS qty, COALESCE(si.cost_price, 0)::float AS cost_price
+              COALESCE(si.qty, 0)::float AS qty, COALESCE(si.cost_price, 0)::float AS cost_price,
+              COALESCE(si.rate, 0)::float AS sale_rate, COALESCE(si.amount, 0)::float AS amount,
+              COALESCE(si.item_discount, 0)::float AS disc
          FROM sales_items si LEFT JOIN medicines m ON m.store_pk=$1 AND m.local_id=si.medicine_id
         WHERE si.sale_id = ANY($2::bigint[]) ORDER BY si.sale_id, si.id`,
       [storePk, pks],
@@ -272,8 +276,8 @@ async function readBooks(storePk, fl) {
 /**
  * The rows read above in the shape billLines takes (the PC's read_bills): bills
  * [{id, local_id, bill_no, d, doctor_name, patient, saved_ms}], items [{id, sale_id (the
- * bill's server id), medicine_id, name, type, batch, unit, mrp, rate, qty, cost_price}] in
- * bill-line order, returns [{sale_id (local), medicine_id, qty}], purchase lines
+ * bill's server id), medicine_id, name, type, batch, unit, mrp, rate, qty, cost_price,
+ * sale_rate, amount, disc (the bill line's own rate, amount and discount)}] in bill-line order, returns [{sale_id (local), medicine_id, qty}], purchase lines
  * [{medicine_id, qty, free_qty, rate, type, unit, tps, saved_ms}] in line order.
  */
 export function shapeBooks(bills, items, rets, plines) {
@@ -295,6 +299,8 @@ export function shapeBooks(bills, items, rets, plines) {
       id: Number(it.id), medicine_id: Number(it.medicine_id || 0), name: String(it.name ?? ''), type: String(it.type ?? ''),
       batch: String(it.batch ?? ''), qty: Number(it.qty) || 0, mrp_unit: (Number(it.mrp) || 0) / d,
       med_rate_unit: (Number(it.rate) || 0) / d, cost_price: Number(it.cost_price) || 0,
+      sale_rate: Number(it.sale_rate) || 0, amount: Number(it.amount) || 0, disc: Number(it.disc) || 0,
+      pack: R.packText(it.unit),
     });
   }
   for (const r of rets) byLid.get(Number(r.sale_id))?.returns.push({ medicine_id: Number(r.medicine_id || 0), qty: Number(r.qty) || 0 });
@@ -354,7 +360,8 @@ export function computeReport(st, books, fl) {
     if (!resolvers.has(pick.version.n)) resolvers.set(pick.version.n, new R.Resolver(pick.version.rules));
     const mids = [...new Set(sale.items.map((it) => it.medicine_id))];
     for (const ln of R.billLines(resolvers.get(pick.version.n), sale, ratesFor(mids, pick.at))) {
-      if (ln.qty > 0) lines.push(ln);
+      // rules_at: the rules' "updated" stamp the line was worked out with (the PC saves it).
+      if (ln.qty > 0) lines.push({ ...ln, rules_at: pick.version.updated });
     }
   }
   // The PC's saved-lines read order (doctor, name, batch, date, bill no, line), then its

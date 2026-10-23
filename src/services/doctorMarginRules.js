@@ -1,24 +1,40 @@
 /**
- * Doctor margin RULES (owner, 22 Oct 2026) -- the PC's core/doctor_margin_rules.py, line for
- * line, so the web and the phone show the same figures as the PC's Doctor Margin Report.
+ * Doctor margin RULES (owner, 22 + 23 Oct 2026) -- the PC's core/doctor_margin_rules.py, line
+ * for line, so the web and the phone show the same figures as the PC's Doctor Margin Report.
  * test/doctorMarginRules.test.mjs checks this file against vectors made by RUNNING the PC
  * python (test/fixtures/doctor_margin_rules_vectors.json).
  *
- * The rules -- one store setting `doctor_margin_rules` (JSON), shop-wide, synced:
- *   {version: 1, rate_basis: 'purchase' | 'purchase_free', updated,
- *    sets: [{doctor: '' (= all doctors) | 'DR NAME', rate_basis: null | ..,
- *            types: [{type, mode: 'none' | 'type' | 'groups', margin, groups, rest}]}]}
- *   group  = {name, margin, items: [{product, batches: [] (= every batch) | ['B1', ..]}]}
+ * Two ways to give a doctor his margin (owner, 23 Oct 2026), chosen PER MEDICINE TYPE:
+ *   on profit       per doctor, product / quantity / MRP / rate / total value with
+ *                   total value = (MRP - rate) x quantity. ONLY the products picked into a
+ *                   group count; a product of that type in no group is not in the report.
+ *   on total sales  X% of the total sale value of the chosen types. No purchase rate.
+ *
+ * The rules -- one store setting `doctor_margin_rules` (JSON), shop-wide, synced. VERSION 2:
+ *   {version: 2, rate_basis: 'purchase' | 'purchase_free', updated,
+ *    sets: [{doctor: '' (= All doctors, always first) | 'DR NAME',
+ *            rate_basis: null (= as All doctors) | 'purchase' | 'purchase_free',
+ *            sales_pct: 0..100 (All doctors: never null) | null (a doctor: All doctors' %),
+ *            types: [{type, mode: 'none' | 'groups' | 'sales', groups: [group]}]}]}
+ *   group  = {name, margin, all: false, items: [{product, batches: [] (= every batch) | ['B1', ..]}]}
+ *          | {name, margin, all: true, items: []}      every product of the type
  *   margin = {kind: 'mrp_rate' | 'pct_mrp' | 'fixed' | 'none', value}
+ * VERSION 1 (22 Oct 2026) is still read and turned into version 2 (cleanRules):
+ *   mode 'type' -> mode 'groups' with ONE group {name: 'All <type>', all: true, margin};
+ *   'rest' (rest of type) -> dropped: a product in no group gives no margin now.
+ *   Always written as version 2.
  *
  * Which rule a sold line gets (doctor D, type T, product P, batch B):
  *   1. D's own set when it has a rule for T, else the All doctors rule for T, else none.
- *   2. mode 'none': no margin; 'type': the type's margin for every product.
- *   3. mode 'groups': a batch-limited item naming B > a one-product group > a bigger group
- *      (the first when two tie); no group holds P: 'rest' (null = no margin).
- * Rate = the purchase rate of THAT batch (medicine row): as billed (pack rate x packs /
- * units bought) or with free included (the same money / every unit received). No purchase
- * line: the medicine row's rate, then the bill's cost ("estimated"); neither: "no_rate".
+ *   2. mode 'none': nothing. mode 'sales': D's own sales_pct when a number, else All doctors'.
+ *   3. mode 'groups': a batch-limited item naming B > a one-product group > a group of several
+ *      products > an "All products" group (the first when two tie); no group holds P: nothing.
+ * On profit: rate = the purchase rate of THAT batch (medicine row), as billed (pack rate x
+ * packs / units bought) or with free included (the same money / every unit received). No
+ * purchase line: the medicine row's rate, then the bill's cost ("estimated"); neither: "no_rate".
+ * On total sales: a line's value = its amount as billed (sales_items.amount, the line discount
+ * off), returns pro rata (amount x net qty / qty sold); the commission is worked out on the
+ * doctor's TOTAL per % = round(sum of values x pct / 100, 2).
  * Nothing here touches a sale, a purchase or stock: the figures are only for the doctor.
  *
  * Python's round() is half-to-even on the double's exact value: pyRound (billRules.js).
@@ -28,16 +44,22 @@ import { isStripCountType, parseTabletsPerStripe } from '../utils/saleProfit.js'
 
 export const SETTING_NAME = 'doctor_margin_rules';
 export const RECALC_SETTING = 'doctor_margin_rules_recalc';
-export const VERSION = 1;
+export const RECALC_VERSION = 1;
+export const VERSION = 2;
 export const NO_DOCTOR = '(No doctor)';
 export const RATE_BASES = ['purchase', 'purchase_free'];
-export const MODES = ['none', 'type', 'groups'];
+export const MODES = ['none', 'groups', 'sales'];
+export const WAYS = ['profit', 'sales'];
 export const KINDS = ['mrp_rate', 'pct_mrp', 'fixed', 'none'];
+export const SALES_KIND = 'sales_pct'; // the kind a total-sales line carries (kind_value = the %)
 export const RATE_BASIS_TEXT = {
   purchase: 'Purchase rate',
   purchase_free: 'Purchase rate with free included',
 };
-export const KIND_TEXT = { mrp_rate: 'MRP - rate', pct_mrp: '% of MRP', fixed: 'Fixed per unit', none: 'No margin' };
+export const KIND_TEXT = {
+  mrp_rate: 'MRP - rate', pct_mrp: '% of MRP', fixed: 'Fixed per unit', none: 'No margin', sales_pct: '% of total sales',
+};
+export const MODE_TEXT = { none: 'No margin', groups: 'On profit (groups)', sales: 'On total sales (%)' };
 export const FLAG_TEXT = {
   estimated: 'Rate not from a purchase',
   no_rate: 'No purchase rate',
@@ -54,16 +76,19 @@ export const normName = (v) => squeeze(v).toUpperCase();
 export const normType = (v) => squeeze(v).toLowerCase();
 export const normBatch = (v) => squeeze(v).toUpperCase();
 
-/** python float(v) with a default: None / '' / not a number / inf / nan -> default. */
+/** python float(v) with a default: None / '' / a list or dict / not a number / inf / nan -> default. */
 export function f(v, dflt = 0) {
   if (v === null || v === undefined) return dflt;
   if (typeof v === 'boolean') return v ? 1 : 0;
   if (typeof v === 'number') return Number.isFinite(v) ? v : dflt;
+  if (typeof v === 'object') return dflt;
   const s = String(v).trim();
   if (!s) return dflt;
   const x = Number(s);
   return Number.isFinite(x) ? x : dflt;
 }
+/** python bool(v) of a JSON value: an empty list / dict is false. */
+const truthy = (v) => (Array.isArray(v) ? v.length > 0 : v !== null && typeof v === 'object' ? Object.keys(v).length > 0 : Boolean(v));
 /** python int(_f(v)): towards zero. */
 const int = (v) => Math.trunc(f(v));
 export const r2 = (v) => pyRound(f(v), 2) + 0;
@@ -81,6 +106,7 @@ const byKeys = (keyFn) => (a, b) => {
   }
   return 0;
 };
+const sum = (list, k) => list.reduce((s, r) => s + r[k], 0);
 
 // ── the rule model ────────────────────────────────────────────────────────────────────────
 
@@ -93,6 +119,14 @@ export function cleanMargin(m) {
   if (kind === 'pct_mrp' && !(value >= 0 && value <= 100)) throw new RulesError('A % of MRP margin must be 0 to 100.');
   if (kind === 'fixed' && value < 0) throw new RulesError('A fixed margin cannot be below 0.');
   return { kind, value: kind === 'pct_mrp' || kind === 'fixed' ? value : 0 };
+}
+
+/** The total-sales %: 0..100; null / '' = not set (a doctor's set: as All doctors). */
+export function cleanPct(v, allowNull) {
+  if (v === null || v === undefined || (typeof v === 'string' && !v.trim())) return allowNull ? null : 0;
+  const x = f(v, -1);
+  if (!(x >= 0 && x <= 100)) throw new RulesError('A % of total sales must be 0 to 100.');
+  return x;
 }
 
 const sortedUnique = (list) => [...new Set(list)].sort(cmp);
@@ -122,28 +156,35 @@ function cleanTypeRule(t) {
   if (!isObj(t)) return null;
   const name = squeeze(t.type);
   if (!name) return null;
-  let mode = String(t.mode || 'none').trim().toLowerCase();
-  if (!MODES.includes(mode)) mode = 'none';
-  const out = { type: name, mode, margin: null, groups: [], rest: null };
-  if (mode === 'type') {
-    out.margin = cleanMargin(t.margin) || { kind: 'mrp_rate', value: 0 };
-  } else if (mode === 'groups') {
+  const mode = String(t.mode || 'none').trim().toLowerCase();
+  const out = { type: name, mode: 'none', groups: [] };
+  if (mode === 'type') { // version 1 "whole type": one All-products group, the same figures
+    out.mode = 'groups';
+    out.groups.push({ name: `All ${name}`, margin: cleanMargin(t.margin) || { kind: 'mrp_rate', value: 0 }, all: true, items: [] });
+    return out;
+  }
+  if (!MODES.includes(mode)) return out;
+  out.mode = mode;
+  if (mode === 'groups') {
+    // version 1 "rest" (rest of type) is not carried: a product in no group gives nothing.
     (Array.isArray(t.groups) ? t.groups : []).forEach((g, i) => {
       if (!isObj(g)) return;
-      const items = cleanItems(g.items);
-      if (!items.length) return;
+      const every = truthy(g.all);
+      const items = every ? [] : cleanItems(g.items);
+      if (!every && !items.length) return;
       out.groups.push({
-        name: squeeze(g.name) || `Group ${i + 1}`,
+        name: squeeze(g.name) || (every ? `All ${name}` : `Group ${i + 1}`),
         margin: cleanMargin(g.margin) || { kind: 'none', value: 0 },
+        all: every,
         items,
       });
     });
-    out.rest = cleanMargin(t.rest);
   }
   return out;
 }
 
-/** The rules, checked and in their one shape. Throws RulesError with what to correct. */
+/** The rules, checked and in their one (version 2) shape; version 1 is read and turned into
+ *  version 2. Throws RulesError with what to correct. */
 export function cleanRules(data) {
   if (typeof data === 'string') {
     try {
@@ -171,10 +212,12 @@ export function cleanRules(data) {
       }
     }
     const sb = String(s.rate_basis || '').trim().toLowerCase();
-    sets.push({ doctor, rate_basis: RATE_BASES.includes(sb) ? sb : null, types });
+    sets.push({
+      doctor, rate_basis: RATE_BASES.includes(sb) ? sb : null, sales_pct: cleanPct(s.sales_pct, doctor !== ''), types,
+    });
   }
   sets.sort(byKeys((s) => [s.doctor !== '' ? 1 : 0, s.doctor]));
-  if (!sets.length || sets[0].doctor !== '') sets.unshift({ doctor: '', rate_basis: null, types: [] });
+  if (!sets.length || sets[0].doctor !== '') sets.unshift({ doctor: '', rate_basis: null, sales_pct: 0, types: [] });
   return {
     version: VERSION,
     rate_basis: RATE_BASES.includes(basis) ? basis : 'purchase',
@@ -219,42 +262,45 @@ export class Resolver {
     return this.rules.rate_basis;
   }
 
-  /** {kind, value, rule, source} -- the margin this line gets, null when it gets none. */
+  salesPct(doctor) {
+    const own = this.byDoctor.get(normName(doctor));
+    if (own && own.sales_pct !== null && own.sales_pct !== undefined) return Number(own.sales_pct);
+    return Number(this.default.sales_pct || 0);
+  }
+
+  /** The way this line gives a margin, null when it gives none:
+   *    on profit       {way: 'profit', kind, value, rule, source}
+   *    on total sales  {way: 'sales', kind: 'sales_pct', value: pct, rule, source} */
   resolve(doctor, medType, product, batch) {
     const [rule, source] = this.typeRule(doctor, medType);
     if (!rule || rule.mode === 'none') return null;
-    let m;
-    let label;
-    if (rule.mode === 'type') {
-      m = rule.margin;
-      label = `${rule.type} (whole type)`;
-    } else {
-      const p = normName(product);
-      const b = normBatch(batch);
-      let best = null;
-      for (const g of rule.groups) {
-        for (const it of g.items) {
-          if (it.product !== p) continue;
-          let rank;
-          if (it.batches.length) {
-            if (!it.batches.includes(b)) continue;
-            rank = 3;
-          } else {
-            rank = g.items.length === 1 ? 2 : 1;
-          }
-          if (best === null || rank > best[0]) best = [rank, g];
-        }
+    if (rule.mode === 'sales') {
+      return { way: 'sales', kind: SALES_KIND, value: this.salesPct(doctor), rule: `${rule.type} (total sales)`, source };
+    }
+    const p = normName(product);
+    const b = normBatch(batch);
+    let best = null;
+    for (const g of rule.groups) {
+      if (g.all) { // "All products": the weakest, the first such group
+        if (best === null) best = [0, g];
+        continue;
       }
-      if (best !== null) {
-        m = best[1].margin;
-        label = `${rule.type} > ${best[1].name}`;
-      } else {
-        m = rule.rest;
-        label = `${rule.type} > rest of type`;
+      for (const it of g.items) {
+        if (it.product !== p) continue;
+        let rank;
+        if (it.batches.length) {
+          if (!it.batches.includes(b)) continue;
+          rank = 3;
+        } else {
+          rank = g.items.length === 1 ? 2 : 1;
+        }
+        if (best === null || rank > best[0]) best = [rank, g];
       }
     }
+    if (best === null) return null; // not in any group: not in the report
+    const m = best[1].margin;
     if (!m || m.kind === 'none') return null;
-    return { kind: m.kind, value: m.value, rule: label, source };
+    return { way: 'profit', kind: m.kind, value: m.value, rule: `${rule.type} > ${best[1].name}`, source };
   }
 }
 
@@ -291,8 +337,8 @@ export function batchRates(purchases) {
 export function hasRules(rules) {
   for (const s of safeRules(rules).sets) {
     for (const t of s.types) {
-      if (t.mode === 'type') return true;
-      if (t.mode === 'groups' && (t.rest || t.groups.some((g) => g.margin.kind !== 'none'))) return true;
+      if (t.mode === 'sales') return true;
+      if (t.mode === 'groups' && t.groups.some((g) => g.margin.kind !== 'none')) return true;
     }
   }
   return false;
@@ -319,9 +365,15 @@ export function marginPerUnit(kind, value, mrp, rate, flags) {
 export function evaluateLine(res, doctor, item, rates, basis) {
   const rule = res.resolve(doctor, item.type || '', item.name || '', item.batch || '');
   if (rule === null) return null;
+  const mrp = Math.max(0, f(item.mrp_unit));
+  if (rule.way === 'sales') {
+    return {
+      way: 'sales', mrp: r4(mrp), rate_purchase: 0, rate_free: 0, rate_basis: '', rate: 0,
+      kind: SALES_KIND, kind_value: rule.value, margin_unit: 0, rule: rule.rule, flags: [],
+    };
+  }
   const mid = int(item.medicine_id);
   const flags = [];
-  const mrp = Math.max(0, f(item.mrp_unit));
   let rp;
   let rf;
   if (rates.has(mid)) {
@@ -339,6 +391,7 @@ export function evaluateLine(res, doctor, item, rates, basis) {
   const rate = basis === 'purchase_free' ? rf : rp;
   const unit = marginPerUnit(rule.kind, rule.value, mrp, rate, flags);
   return {
+    way: 'profit',
     mrp: r4(mrp),
     rate_purchase: r4(rp),
     rate_free: r4(rf),
@@ -353,15 +406,26 @@ export function evaluateLine(res, doctor, item, rates, basis) {
 }
 
 /** A line seen with the other rate (the report's rate choice): the line's MRP, both rates
- *  and rule; only which of the two rates is used changes (the PC's with_basis). */
+ *  and rule; only which of the two rates is used changes (the PC's with_basis). A total-sales
+ *  line has no rate: as it is. */
 export function withBasis(row, basis) {
-  if (!RATE_BASES.includes(basis) || basis === row.rate_basis) return row;
+  if (!RATE_BASES.includes(basis) || basis === row.rate_basis || row.way === 'sales') return row;
   const flags = (row.flags || []).filter((x) => x !== 'rate_over_mrp');
   const rate = f(basis === 'purchase_free' ? row.rate_free : row.rate_purchase);
   const unit = marginPerUnit(String(row.kind || ''), f(row.kind_value), f(row.mrp), rate, flags);
   return {
     ...row, rate_basis: basis, rate: r4(rate), margin_unit: r4(unit), value: r2(r4(unit) * f(row.qty)), flags,
   };
+}
+
+/** A line's value at its net qty: the margin (on profit) or the sale value (total sales). */
+export function lineValue(ln) {
+  const qty = f(ln.qty);
+  if (ln.way === 'sales') {
+    const sold = f(ln.qty_sold);
+    return sold > 0 ? r2((f(ln.amount) * qty) / sold) : 0;
+  }
+  return r2(f(ln.margin_unit) * qty);
 }
 
 /** Spread a bill's returned qty (per medicine) over its lines in bill order; sets
@@ -379,11 +443,15 @@ export function applyReturns(lines, returns) {
     if (took > 0) back.set(mid, back.get(mid) - took);
     ln.qty_returned = r3(took);
     ln.qty = r3(sold - took);
-    ln.value = r2(f(ln.margin_unit) * ln.qty);
+    // Each line's value is rounded once; every total adds these.
+    ln.value = lineValue(ln);
   }
 }
 
-/** The margin lines of one bill, returns applied; lines that give no margin left out. */
+/** The margin lines of one bill (both ways), returns applied; lines that give no margin left
+ *  out. Sale items may carry the bill line's own figures (the total-sales way needs them):
+ *  sale_rate (per unit as billed), amount (the line's amount, its discount off), disc (the
+ *  line's discount in rupees), pack (the medicine's pack text). */
 export function billLines(res, sale, rates, rateBasis = '') {
   const doctor = normName(sale.doctor);
   if (!doctor) return []; // a bill without a doctor gives no one a margin
@@ -404,7 +472,12 @@ export function billLines(res, sale, rates, rateBasis = '') {
       name: String(it.name || ''),
       type: String(it.type || ''),
       batch: String(it.batch || ''),
+      pack: String(it.pack || ''),
       qty_sold: r3(Math.max(0, sold)),
+      sale_rate: r4(f(it.sale_rate)),
+      disc: r2(f(it.disc)),
+      amount: r2(f(it.amount)),
+      way: ev ? ev.way : '',
       margin_unit: ev ? ev.margin_unit : 0,
       _ev: ev,
     });
@@ -422,10 +495,12 @@ export function billLines(res, sale, rates, rateBasis = '') {
   return out;
 }
 
-/** Lines -> {rows, summary (the owner's Excel: per doctor, product, batch, MRP, rate),
- *  doctors, totals}. Every total adds the lines' own (already rounded) values. */
-export function assemble(input) {
-  const rows = [...input].sort(byKeys((r) => [r.doctor, r.name, r.batch, r.date, r.bill_no]));
+const sortKey = (r) => [r.doctor, r.name, r.batch, r.date, r.bill_no];
+
+/** On-profit lines -> {rows, summary (the owner's Excel: per doctor, product, batch, MRP,
+ *  rate), doctors, totals}. Every total adds the lines' own (already rounded) values. */
+export function assembleProfit(input) {
+  const rows = [...input].sort(byKeys(sortKey));
   const groups = new Map();
   for (const r of rows) {
     const k = JSON.stringify([r.doctor, r.name, r.batch, r.mrp, r.rate, r.margin_unit]);
@@ -441,7 +516,6 @@ export function assemble(input) {
     g.value = r2(g.value + r.value);
     for (const x of r.flags) if (!g.flags.includes(x)) g.flags.push(x);
   }
-  const sum = (list, k) => list.reduce((s, r) => s + r[k], 0);
   const doctors = [...new Set(rows.map((r) => r.doctor))].sort(cmp).map((d) => {
     const mine = rows.filter((r) => r.doctor === d);
     return { doctor: d, qty: r3(sum(mine, 'qty')), value: r2(sum(mine, 'value')), lines: mine.length };
@@ -451,6 +525,91 @@ export function assemble(input) {
     summary: [...groups.values()],
     doctors,
     totals: { qty: r3(sum(rows, 'qty')), value: r2(sum(rows, 'value')), lines: rows.length },
+  };
+}
+
+/** The "Customer-Wise Product-Batch Wise Sales" layout: per product (name + pack heading), its
+ *  bill lines by customer, date, bill no, and the product's sub-total qty and value. */
+export function salesProducts(rows) {
+  const out = new Map();
+  const sorted = [...rows].sort(byKeys((r) => [r.name, r.pack || '', r.patient, r.date, r.bill_no, r.line_no || 0]));
+  for (const r of sorted) {
+    const k = JSON.stringify([r.name, r.pack || '']);
+    let g = out.get(k);
+    if (!g) {
+      g = { name: r.name, pack: r.pack || '', type: r.type, lines: [], qty: 0, value: 0 };
+      out.set(k, g);
+    }
+    g.lines.push(r);
+    g.qty = r3(g.qty + r.qty);
+    g.value = r2(g.value + r.value);
+  }
+  return [...out.values()];
+}
+
+/** Total-sales lines -> {rows, doctors: [{doctor, qty, value, lines, types, by_pct:
+ *  [{pct, value, commission}], commission, products}], totals: {qty, value, lines, commission}}.
+ *  The commission is worked out per doctor on the total of each %: round(value x pct / 100, 2). */
+export function assembleSales(input) {
+  const rows = [...input].sort(byKeys(sortKey));
+  const doctors = [...new Set(rows.map((r) => r.doctor))].sort(cmp).map((d) => {
+    const mine = rows.filter((r) => r.doctor === d);
+    const pcts = [...new Set(mine.map((r) => f(r.kind_value)))].sort((a, b) => b - a);
+    const byPct = pcts.map((pct) => {
+      const value = r2(sum(mine.filter((r) => f(r.kind_value) === pct), 'value'));
+      return { pct, value, commission: r2((value * pct) / 100) };
+    });
+    const types = [];
+    for (const r of mine) {
+      if (r.type && !types.some((t) => normType(t) === normType(r.type))) types.push(r.type);
+    }
+    return {
+      doctor: d,
+      qty: r3(sum(mine, 'qty')),
+      value: r2(sum(mine, 'value')),
+      lines: mine.length,
+      types: types.sort(byKeys((t) => [normType(t)])),
+      by_pct: byPct,
+      commission: r2(sum(byPct, 'commission')),
+      products: salesProducts(mine),
+    };
+  });
+  return {
+    rows,
+    doctors,
+    totals: {
+      qty: r3(sum(rows, 'qty')), value: r2(sum(rows, 'value')), lines: rows.length, commission: r2(sum(doctors, 'commission')),
+    },
+  };
+}
+
+/** Both ways' lines -> the on-profit report at the top level (rows, summary, doctors, totals),
+ *  the total-sales report under `sales`, and per doctor the two added under `grand`:
+ *  {doctors: [{doctor, profit, sales_value, commission, total}], totals: {profit, sales_value,
+ *  commission, total}}. */
+export function assemble(input) {
+  const profit = assembleProfit(input.filter((r) => r.way !== 'sales'));
+  const sales = assembleSales(input.filter((r) => r.way === 'sales'));
+  const pd = new Map(profit.doctors.map((d) => [d.doctor, d]));
+  const sd = new Map(sales.doctors.map((d) => [d.doctor, d]));
+  const grand = [...new Set([...pd.keys(), ...sd.keys()])].sort(cmp).map((d) => {
+    const p = pd.has(d) ? pd.get(d).value : 0;
+    const s = sd.get(d);
+    const c = s ? s.commission : 0;
+    return { doctor: d, profit: p, sales_value: s ? s.value : 0, commission: c, total: r2(p + c) };
+  });
+  return {
+    ...profit,
+    sales,
+    grand: {
+      doctors: grand,
+      totals: {
+        profit: profit.totals.value,
+        sales_value: sales.totals.value,
+        commission: sales.totals.commission,
+        total: r2(profit.totals.value + sales.totals.commission),
+      },
+    },
   };
 }
 
@@ -467,6 +626,12 @@ export function compute(sales, purchases, rules, opts = {}) {
     for (const r of billLines(res, s, rates, forced)) if (r.qty > 0) rows.push(r);
   }
   return assemble(rows);
+}
+
+/** The medicine's pack as the product heading shows it ("15", "30ML"); a bare 1 is none. */
+export function packText(unit) {
+  const u = squeeze(unit);
+  return u === '' || u === '1' || u === '0' ? '' : u;
 }
 
 /** The detail layout: per product (name), its lines by batch / date, and a sub-total. */
