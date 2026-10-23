@@ -5,6 +5,9 @@ import { MedicineSearch, PartyPicker, PayDue, useDebounced } from './common.jsx'
 
 const EMPTY = { name: '', batch_no: '', expiry: '', type: 'Tablet', unit: '10', qty: '', free_qty: '', rate: '', mrp: '', gst_pct: '12', discount_pct: '', hsn_code: '', schedule: '', manufacturer: '', rate_a: '', rate_b: '', rate_c: '' };
 const r2 = (x) => Math.round((Number(x) || 0) * 100) / 100;
+/** What the purchase was paid at entry (the supplier's due rule), not amount_paid: 295 live
+ *  purchases carry amount_paid 0 with cash / online at entry filled (22 Oct 2026). */
+const paidAtEntry = (p) => { const x = purchaseEntryPaid(p); return r2(x.cash + x.online); };
 /** Wholesale: a line with a name and no Rate A above zero (owner, 18 Oct 2026: Rate A is required). */
 const needsRateA = (l) => Boolean(String(l.name || '').trim()) && !(Number(l.rate_a) > 0);
 const TYPES = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Ointment', 'Drops', 'Powder', 'Bolus', 'Tablet Pack', 'Other'];
@@ -281,7 +284,7 @@ function History({ can, ws = false }) {
               {ws && <><td className="r">{it.rate_a ? money(it.rate_a) : ''}</td><td className="r">{it.rate_b ? money(it.rate_b) : ''}</td><td className="r">{it.rate_c ? money(it.rate_c) : ''}</td></>}
               <td className="r">{it.gst_pct}</td><td className="r">{money(it.item_amount)}</td></tr>)}</tbody>
           </table>
-          <p>Taxable {money(open.subtotal)} · GST {money(open.total_gst)} · <b>Total ₹ {money(open.total_amount)}</b> · Paid {money(open.amount_paid)}</p>
+          <p>Taxable {money(open.subtotal)} · GST {money(open.total_gst)} · <b>Total ₹ {money(open.total_amount)}</b> · Paid {money(paidAtEntry(open))}</p>
         </div>}
       </div>
     </div>

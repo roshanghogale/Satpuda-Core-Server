@@ -101,7 +101,9 @@ export const PURCHASES_SORTS = {
   amount_asc: 'final_amount ASC, local_id ASC',
   due_desc: 'due_amount DESC, local_id DESC',
   due_asc: 'due_amount ASC, local_id ASC',
-  paid_desc: 'amount_paid DESC, local_id DESC',
+  // Paid at entry, as the supplier's due reads it (partyDueCascade PURCHASE_ENTRY_PAID_SQL).
+  paid_desc: 'COALESCE(NULLIF(COALESCE(cash_paid_at_entry,0)+COALESCE(online_paid_at_entry,0),0), '
+    + 'NULLIF(amount_paid_at_entry,0), amount_paid, 0) DESC, local_id DESC',
   number_asc: 'purchase_no ASC, local_id ASC',
   number_desc: 'purchase_no DESC, local_id DESC',
   party_asc: "COALESCE(supplier_name,'') ASC, purchase_date DESC, local_id DESC",
