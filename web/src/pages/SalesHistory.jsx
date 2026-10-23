@@ -135,7 +135,7 @@ export default function SalesHistory({ me, can }) {
           </div>
         )}
       </div>
-      {doctorReport && <DoctorMargin from={from} to={to} onClose={() => setDoctorReport(false)} />}
+      {doctorReport && <DoctorMargin from={from} to={to} canEdit={can('reports')} onClose={() => setDoctorReport(false)} />}
     </div>
   );
 }

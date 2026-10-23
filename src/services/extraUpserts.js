@@ -9,6 +9,7 @@ import {
   writeTimestamp,
 } from './upsertHelper.js';
 import { parseTs, toBool } from '../utils/fy.js';
+import { SETTING_NAME as DM_RULES_SETTING, recordRulesHistory } from './doctorMarginHistory.js';
 
 const num = (v) => (v == null || v === '' ? null : Number(v));
 const num0 = (v) => Number(v || 0);
@@ -185,7 +186,7 @@ export async function upsertSettingsKv(client, storePk, docs) {
     if (!name) continue;
     const value = doc.value == null ? null : String(doc.value);
     const { rows } = await client.query(
-      `SELECT value FROM store_settings WHERE store_pk=$1 AND name=$2`,
+      `SELECT value, updated_at FROM store_settings WHERE store_pk=$1 AND name=$2`,
       [storePk, String(name)]
     );
     if (rows[0] && String(rows[0].value ?? '') === String(value ?? '')) {
@@ -198,6 +199,9 @@ export async function upsertSettingsKv(client, storePk, docs) {
        ON CONFLICT (store_pk, name) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()`,
       [storePk, String(name), value]
     );
+    // Doctor margin rules: every version is kept, so old bills keep the rules they were
+    // saved with (services/doctorMarginHistory.js). Never fails this write.
+    if (String(name) === DM_RULES_SETTING) await recordRulesHistory(client, storePk, rows[0] || null, value);
     upserted++;
   }
   return { results: [], upserted, skipped };
