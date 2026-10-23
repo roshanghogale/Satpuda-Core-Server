@@ -12,6 +12,7 @@ import { errorMiddleware, trustedClientIp } from './utils/http.js';
 import authRoutes from './routes/auth.js';
 import syncRoutes from './routes/sync.js';
 import syncV2Routes from './routes/syncV2.js';
+import { repeatPullGuard } from './middleware/repeatPullGuard.js';
 import storeQueryRoutes from './routes/storeQuery.js';
 import adminRoutes from './routes/admin.js';
 import masterMedicineRoutes from './routes/masterMedicines.js';
@@ -226,6 +227,9 @@ app.use((req, res, next) => {
 // cannot reach the database or the store API.
 app.use('/api/', generalLimiter);
 app.use('/api/sync', syncLimiter);
+// The same list pull repeated in a tight loop is held off before auth or the database
+// (middleware/repeatPullGuard.js).
+app.use('/api/sync', repeatPullGuard);
 app.use('/api/store', syncLimiter);
 app.use('/api/master-medicines', syncLimiter);
 
