@@ -19,7 +19,7 @@ async function main() {
     'pharmacy_profiles', 'store_settings', 'store_dropdowns',
     'general_products', 'stock_disposals', 'pending_orders',
     'racks', 'sections', 'boxes', 'shelves', 'medicine_shelf', 'shelf_settings',
-    'medicine_suppliers', 'fy_serials', 'sync_watermarks', 'audit_log',
+    'medicine_suppliers', 'cash_days', 'cash_expenses', 'fy_serials', 'sync_watermarks', 'audit_log',
   ];
   const have = new Set(rows.map((r) => r.table_name));
   const missing = expected.filter((t) => !have.has(t));

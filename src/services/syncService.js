@@ -12,6 +12,8 @@ import {
   upsertShelf,
   upsertMedicineShelf,
   upsertMedicineSupplier,
+  upsertCashDay,
+  upsertCashExpense,
   upsertShelfSettings,
   upsertSettingsKv,
 } from './extraUpserts.js';
@@ -441,6 +443,9 @@ export const COLLECTIONS = [
   'shelves',
   'medicine_shelf',
   'medicine_suppliers',
+  // Cash & Expenses (PC core/cash_register.py): the day's opening / counted cash, typed lines.
+  'cash_days',
+  'cash_expenses',
   // medicines_master is global — use /api/master-medicines, not store sync
 ];
 
@@ -1688,6 +1693,8 @@ const UPSERT_MAP = {
   shelves: upsertShelf,
   medicine_shelf: upsertMedicineShelf,
   medicine_suppliers: upsertMedicineSupplier,
+  cash_days: upsertCashDay,
+  cash_expenses: upsertCashExpense,
 };
 
 export async function pushDocs(storePk, collection, docs) {
@@ -1810,6 +1817,7 @@ export async function applyBundleInTx(client, storePk, bundle, hint) {
     'sales_returns', 'purchase_returns',
     'general_products', 'stock_disposals', 'stock_operations', 'pending_orders',
     'racks', 'sections', 'boxes', 'shelves', 'medicine_shelf', 'medicine_suppliers',
+    'cash_days', 'cash_expenses',
   ];
   const summary = {};
   {
@@ -2553,6 +2561,16 @@ export async function fetchDocsByLocalIds(storePk, collection, localIds) {
                     updated_at, version, device_id, deleted, sync_status
              FROM medicine_suppliers WHERE store_pk=$1${idFilter}${delClause}`;
       break;
+    case 'cash_days':
+      sql = `SELECT local_id AS id, day, opening_cash, counted_cash, closed_at, note, created_at,
+                    updated_at, version, device_id, deleted, sync_status
+             FROM cash_days WHERE store_pk=$1${idFilter}${delClause}`;
+      break;
+    case 'cash_expenses':
+      sql = `SELECT local_id AS id, day, at, kind, category, description, amount, created_at,
+                    updated_at, version, device_id, deleted, sync_status
+             FROM cash_expenses WHERE store_pk=$1${idFilter}${delClause}`;
+      break;
     default:
       throw new AppError(400, `Unknown collection: ${collection}`);
   }
@@ -2762,6 +2780,18 @@ export async function pullCollection(
       sql = `SELECT local_id AS id, medicine_name, supplier_id, last_rate, last_purchase_date, created_at,
                     updated_at, version, device_id, deleted, sync_status
              FROM medicine_suppliers WHERE store_pk=$1 AND updated_at > $2${delClause}
+             ORDER BY updated_at ASC LIMIT $3`;
+      break;
+    case 'cash_days':
+      sql = `SELECT local_id AS id, day, opening_cash, counted_cash, closed_at, note, created_at,
+                    updated_at, version, device_id, deleted, sync_status
+             FROM cash_days WHERE store_pk=$1 AND updated_at > $2${delClause}
+             ORDER BY updated_at ASC LIMIT $3`;
+      break;
+    case 'cash_expenses':
+      sql = `SELECT local_id AS id, day, at, kind, category, description, amount, created_at,
+                    updated_at, version, device_id, deleted, sync_status
+             FROM cash_expenses WHERE store_pk=$1 AND updated_at > $2${delClause}
              ORDER BY updated_at ASC LIMIT $3`;
       break;
     case 'medicines_master':
@@ -3259,6 +3289,8 @@ const ALLOCATE_TABLES = new Set([
   'shelves',
   'medicine_shelf',
   'medicine_suppliers',
+  'cash_days',
+  'cash_expenses',
 ]);
 
 export async function allocateLocalIds(storePk, requests = []) {
