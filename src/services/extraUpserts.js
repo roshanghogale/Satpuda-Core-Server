@@ -112,6 +112,37 @@ export async function upsertBox(client, storePk, doc) {
   });
 }
 
+/** Cash & Expenses (PC core/cash_register.py, 25 Oct 2026): the day's opening / counted cash. */
+export async function upsertCashDay(client, storePk, doc) {
+  return upsertSimple(client, {
+    table: 'cash_days', storePk, doc,
+    columns: [
+      { key: 'day', transform: date },
+      { key: 'opening_cash', transform: num },
+      { key: 'counted_cash', transform: num },
+      { key: 'closed_at', transform: ts },
+      { key: 'note', transform: str },
+      { key: 'created_at', transform: ts },
+    ],
+  });
+}
+
+/** A typed line of the register: kind 'out' = expense, 'in' = cash added to the drawer. */
+export async function upsertCashExpense(client, storePk, doc) {
+  return upsertSimple(client, {
+    table: 'cash_expenses', storePk, doc,
+    columns: [
+      { key: 'day', transform: date },
+      { key: 'at', transform: (v) => (v == null ? null : String(v).slice(0, 5)) },
+      { key: 'kind', transform: (v) => (String(v || 'out').toLowerCase() === 'in' ? 'in' : 'out') },
+      { key: 'category', transform: str },
+      { key: 'description', transform: str },
+      { key: 'amount', transform: num0 },
+      { key: 'created_at', transform: ts },
+    ],
+  });
+}
+
 export async function upsertShelf(client, storePk, doc) {
   return upsertSimple(client, {
     table: 'shelves', storePk, doc,

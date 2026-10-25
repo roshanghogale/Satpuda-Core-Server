@@ -34,7 +34,7 @@ router.get('/meta', (_req, res) => {
       'sales_returns', 'purchase_returns',
       'general_products', 'stock_disposals', 'pending_orders',
       'racks', 'sections', 'boxes', 'shelves', 'medicine_shelf',
-      'medicine_suppliers',
+      'medicine_suppliers', 'cash_days', 'cash_expenses',
     ],
     special: ['pharmacy_profile', 'dropdowns', 'shelf_settings', 'settings'],
     global_master: '/api/master-medicines',

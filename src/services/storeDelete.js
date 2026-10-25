@@ -96,6 +96,8 @@ export const CASCADE_TABLES = [
   'stock_disposals',
   'stock_operations',
   'pending_orders',
+  'cash_days',
+  'cash_expenses',
   'fy_serials',
   'sync_watermarks',
   'store_sync_state',

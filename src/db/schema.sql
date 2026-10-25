@@ -670,6 +670,52 @@ CREATE TABLE IF NOT EXISTS boxes (
   UNIQUE(store_pk, local_id)
 );
 
+-- ─── Cash & Expenses (PC core/cash_register.py, 25 Oct 2026) ──────────────────
+-- One row per date the shop opened the register: the cash in the drawer at open, the cash
+-- counted at close. The bills' own cash is never stored here; every client reads it from the
+-- bills, receipts, returns, purchases and supplier payments of the date.
+
+CREATE TABLE IF NOT EXISTS cash_days (
+  id            BIGSERIAL PRIMARY KEY,
+  store_pk      INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  local_id      BIGINT NOT NULL,
+  day           DATE NOT NULL,
+  opening_cash  NUMERIC(14,2),
+  counted_cash  NUMERIC(14,2),
+  closed_at     TIMESTAMPTZ,
+  note          TEXT,
+  created_at    TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  version       INT NOT NULL DEFAULT 1,
+  device_id     TEXT,
+  deleted       BOOLEAN NOT NULL DEFAULT FALSE,
+  sync_status   TEXT NOT NULL DEFAULT 'synced',
+  UNIQUE(store_pk, local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cash_days_store_day ON cash_days (store_pk, day);
+
+-- A typed line of the register: kind 'out' = an expense (tea, medicines bought from another
+-- store), 'in' = cash the owner put in the drawer.
+CREATE TABLE IF NOT EXISTS cash_expenses (
+  id            BIGSERIAL PRIMARY KEY,
+  store_pk      INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
+  local_id      BIGINT NOT NULL,
+  day           DATE NOT NULL,
+  at            TEXT,
+  kind          TEXT NOT NULL DEFAULT 'out',
+  category      TEXT,
+  description   TEXT,
+  amount        NUMERIC(14,2) NOT NULL DEFAULT 0,
+  created_at    TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  version       INT NOT NULL DEFAULT 1,
+  device_id     TEXT,
+  deleted       BOOLEAN NOT NULL DEFAULT FALSE,
+  sync_status   TEXT NOT NULL DEFAULT 'synced',
+  UNIQUE(store_pk, local_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cash_expenses_store_day ON cash_expenses (store_pk, day);
+
 CREATE TABLE IF NOT EXISTS shelves (
   id            BIGSERIAL PRIMARY KEY,
   store_pk      INT NOT NULL REFERENCES stores(id) ON DELETE CASCADE,
