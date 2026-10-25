@@ -5,6 +5,7 @@ import {
   deviceStatus,
   listDevices,
   listFlags,
+  numberHead,
   pushEvents,
   registerDevice,
   reserveNumberBlock,
@@ -34,6 +35,16 @@ router.post('/number-block', asyncHandler(async (req, res) => {
     kind: b.kind,
     fyStartYear: b.fy_start_year,
     size: b.size,
+  }));
+}));
+
+/** Are the numbers left in this device's blocks still free on the server? Read-only:
+ *  GET /number-head?fy=2026&sales=51-200&purchases=11-50 (services/syncV2.js numberHead). */
+router.get('/number-head', asyncHandler(async (req, res) => {
+  ok(res, await numberHead(await resolveStorePk(req), {
+    fyStartYear: req.query.fy,
+    sales: req.query.sales,
+    purchases: req.query.purchases,
   }));
 }));
 

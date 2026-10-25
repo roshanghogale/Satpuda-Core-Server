@@ -26,6 +26,7 @@ import {
   emitSyncHint,
   fetchDocsByLocalIds,
   lockStorePush,
+  billSerialColumns,
   reserveNumberBlockInTx,
 } from './syncService.js';
 import { ensureStoreSyncState, newSyncHint } from './syncRevision.js';
@@ -113,7 +114,7 @@ const DOC_NUMBER_COLUMNS = [
   ['SD', 'stock_disposals', 'disposal_no'],
   ['RO', 'pending_orders', 'order_no'],
 ];
-async function deviceFloors(client, storePk, deviceNo) {
+export async function deviceFloors(client, storePk, deviceNo) {
   const lo = deviceNo * LEGACY_ID_LIMIT;
   const hi = (deviceNo + 1) * LEGACY_ID_LIMIT - 1;
   const idFloor = {};
@@ -149,16 +150,10 @@ async function deviceFloors(client, storePk, deviceNo) {
     [storePk, deviceNo],
   );
   for (const b of blocks) {
-    const table = b.kind === 'sales' ? 'sales' : 'purchases';
-    const dateCol = b.kind === 'sales' ? 'bill_date' : 'purchase_date';
     const fy = Number(b.fy_start_year);
-    const { rows } = await client.query(
-      `SELECT COALESCE(MAX(fy_serial), 0) AS m FROM ${table}
-        WHERE store_pk=$1 AND fy_serial BETWEEN $2 AND $3
-          AND (fy_start_year = $4 OR (${dateCol} >= $5 AND ${dateCol} <= $6))`,
-      [storePk, b.from_serial, b.to_serial, fy, `${fy}-04-01`, `${fy + 1}-03-31`],
+    const { ranges: [used] } = await takenNumbers(
+      client, storePk, b.kind, fy, [[Number(b.from_serial), Number(b.to_serial)]],
     );
-    const used = Number(rows[0]?.m || 0);
     if (used < Number(b.to_serial)) {
       openBlocks.push({
         kind: b.kind, fy_start_year: fy,
@@ -168,6 +163,72 @@ async function deviceFloors(client, storePk, deviceNo) {
     }
   }
   return { id_floor: idFloor, doc_floor: docFloor, open_blocks: openBlocks };
+}
+
+/**
+ * The numbers a store already holds in one financial year's bill (or purchase) book: `head`,
+ * the highest number any bill of the year holds (imported ones too), and for each [from, to]
+ * the highest number held inside it (0 when none). Every row counts -- deleted and draft bills
+ * too, read from the code or from fy_serial -- so a number reported free is free.
+ */
+export async function takenNumbers(client, storePk, kind, fy, ranges = []) {
+  const k = kind === 'sales' ? 'sales' : 'purchases';
+  const dateCol = k === 'sales' ? 'bill_date' : 'purchase_date';
+  const params = [storePk, Number(fy), `${fy}-04-01`, `${Number(fy) + 1}-03-31`];
+  const cols = ranges.map(([lo, hi], i) => {
+    params.push(Number(lo), Number(hi));
+    const p = `$${params.length - 1} AND $${params.length}`;
+    return `GREATEST(COALESCE(MAX(a) FILTER (WHERE a BETWEEN ${p}), 0),
+                     COALESCE(MAX(b) FILTER (WHERE b BETWEEN ${p}), 0)) AS r${i}`;
+  });
+  const { rows } = await client.query(
+    `SELECT GREATEST(COALESCE(MAX(a), 0), COALESCE(MAX(b), 0)) AS head${cols.map((c) => `,
+            ${c}`).join('')}
+       FROM (SELECT ${billSerialColumns(k)} FROM ${k}
+              WHERE store_pk=$1 AND (fy_start_year = $2 OR (${dateCol} >= $3 AND ${dateCol} <= $4))) s`,
+    params,
+  );
+  const row = rows[0] || {};
+  return { head: Number(row.head || 0), ranges: ranges.map((_, i) => Number(row[`r${i}`] || 0)) };
+}
+
+const MAX_HEAD_RANGES = 10;
+
+/** "51-200,301-500" -> [[51, 200], [301, 500]]; anything else is refused. */
+function parseRanges(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return [];
+  const out = s.split(',').map((part) => {
+    const m = part.trim().match(/^(\d{1,9})-(\d{1,9})$/);
+    if (!m || Number(m[1]) < 1 || Number(m[1]) > Number(m[2])) {
+      throw new AppError(400, 'ranges must look like 51-200,301-500');
+    }
+    return [Number(m[1]), Number(m[2])];
+  });
+  if (out.length > MAX_HEAD_RANGES) throw new AppError(400, `at most ${MAX_HEAD_RANGES} ranges per kind`);
+  return out;
+}
+
+/**
+ * GET /number-head: can a device still print the numbers left in its blocks? It sends the part
+ * of each block it has not printed yet (sales=51-200&purchases=11-50); `taken` above 0 means
+ * some other bill already holds a number in there (a data import, a restored backup), so the
+ * device drops that block and reserves a fresh one, which starts after every number issued.
+ * `head` is the highest number of the year on the server. Read-only.
+ */
+export async function numberHead(storePk, { fyStartYear, sales, purchases } = {}) {
+  const fy = Number(fyStartYear);
+  if (!Number.isInteger(fy) || fy < 2000 || fy > 2100) throw new AppError(400, 'fy required (e.g. 2026)');
+  const out = { fy_start_year: fy };
+  const asked = { sales: parseRanges(sales), purchases: parseRanges(purchases) };
+  for (const kind of ['sales', 'purchases']) {
+    const r = await takenNumbers({ query }, storePk, kind, fy, asked[kind]);
+    out[kind] = {
+      head: r.head,
+      ranges: asked[kind].map(([lo, hi], i) => ({ from: lo, to: hi, taken: r.ranges[i] })),
+    };
+  }
+  return out;
 }
 
 export async function reserveNumberBlock(storePk, { installId, kind, fyStartYear, size } = {}) {

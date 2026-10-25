@@ -3133,9 +3133,24 @@ async function maxReservedSerial(client, storePk, kind, fy) {
 }
 
 /**
+ * The numbers a sales / purchases row holds, as SQL for a sub-select: `a` is the serial in its
+ * code (SCB12/FY2026-27 -> 12, 41/FY2026-27 -> 41; the code is what the live-number index
+ * guards), `b` its fy_serial (an imported bill may have only one of the two). The same codes
+ * maxExistingFySerial parses. Callers treat a number as taken if either reading names it.
+ */
+export function billSerialColumns(kind) {
+  const code = kind === 'sales' ? 'bill_no' : 'purchase_no';
+  const prefix = kind === 'sales' ? 'SCB' : 'APU';
+  return `NULLIF(substring(split_part(upper(${code}), '/FY', 1) from '^(?:${prefix})?([0-9]{1,9})$'), '')::bigint AS a,
+          fy_serial::bigint AS b`;
+}
+
+/**
  * Reserve the next `size` bill (or purchase) numbers of a financial year for one device.
  * The device prints them while offline; nothing else is ever given a number inside the
- * block, so two devices never print the same one.
+ * block, so two devices never print the same one. The block starts after every live bill of
+ * the year (imported ones too, by code or fy_serial) and after every block already reserved,
+ * so it never overlaps a number that is issued or promised (test/numberHead.test.mjs).
  */
 export async function reserveNumberBlockInTx(client, storePk, { kind, fyStartYear, deviceNo, size }) {
   const k = kind === 'sales' ? 'sales' : 'purchases';
