@@ -31,6 +31,14 @@ import {
 } from './syncService.js';
 import { ensureStoreSyncState, newSyncHint } from './syncRevision.js';
 import { assertDeviceSawWipe, storeWipeState } from './storeWipe.js';
+import {
+  RETURN_COLLECTIONS,
+  duplicateSupplierBill,
+  fixOps,
+  parseBaseLines,
+  replacedSaleFix,
+  returnRules,
+} from './clashRules.js';
 
 /** device_no * 1e9 stays an exact integer in JavaScript and Kotlin up to here (9e12 < 2^53). */
 export const MAX_DEVICE_NO = 9000;
@@ -267,6 +275,9 @@ function normalizeEvent(raw) {
     stock_ops: stockOps,
     local_id: Number.isFinite(localId) ? localId : null,
     base_version: Number.isFinite(Number(ev.base_version)) ? Number(ev.base_version) : null,
+    // Optional (newer devices): the bill's lines as the device saw them before its change,
+    // [[medicine_id, qty], ...]. Lets the server put stock straight on a clash (clashRules.js).
+    base_lines: parseBaseLines(ev.base_lines),
     device_time: ev.device_time || null,
     raw: ev,
   };
@@ -294,6 +305,8 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
   const flags = [];
   let replaced = null;
   let bundle;
+  let fix = [];          // server stock operations that put a clash straight (clashRules.js)
+  let keptDeleted = false;
   if (ev.op === 'stock') {
     bundle = { stock_operations: ev.stock_ops.map((o) => ({ ...o, device_id: o.device_id || device.install_id })) };
   } else if (SINGLETONS.has(ev.collection)) {
@@ -313,6 +326,7 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
     }
     const stored = await storedRow(client, storePk, ev.collection, localId);
     const base = ev.base_version ?? 0;
+    let concurrent = false;
     if (stored) {
       const sv = Number(stored.version || 0);
       // A clash is ANOTHER device's change this device had not seen. The server's own
@@ -320,6 +334,7 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
       // so a version that moved under this device's own last write is not a clash.
       const lastWriter = String(stored.device_id || '');
       if (sv > base && lastWriter !== device.install_id) {
+        concurrent = true;
         // Someone else changed it since this device last saw it. Both edits are facts: this
         // one is applied (the later one wins), the replaced copy is kept here, the owner is told.
         flags.push(['concurrent_edit', `server had version ${sv}, the device edited version ${base}`]);
@@ -333,6 +348,30 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
         flags.push(['foreign_id', `new ${ev.collection}/${localId} is outside this device's id range`]);
       }
     }
+    const ref = { eventUuid: ev.event_uuid, refCollection: ev.collection, refId: localId, deviceId: device.install_id };
+    if (ev.collection === 'sales' && replaced && ev.base_lines) {
+      // Two edits of one bill: this one wins, and the stock the replaced copy moved since the
+      // lines this device edited from goes back.
+      fix = fixOps(await replacedSaleFix(client, stored.doc, ev.base_lines), { ...ref, tag: 'clash' });
+      if (fix.length) {
+        const c = flags.find((f) => f[0] === 'concurrent_edit');
+        if (c) c[1] += `; the replaced copy's stock was put back (${fix.map((o) => `medicine ${o.medicine_id} ${o.qty_delta > 0 ? '+' : ''}${o.qty_delta}`).join(', ')})`;
+      }
+    } else if (ev.op === 'upsert' && RETURN_COLLECTIONS.has(ev.collection)) {
+      const rr = await returnRules(client, {
+        storePk, collection: ev.collection, doc, localId,
+        stored: stored ? stored.doc : null, concurrent, base: ev.base_lines,
+      });
+      flags.push(...rr.flags);
+      if (rr.keepDeleted) {
+        keptDeleted = true;
+        doc.deleted = true;
+        fix = fixOps(rr.fix, { ...ref, tag: 'deleted' });
+      }
+    } else if (ev.op === 'upsert' && ev.collection === 'purchases') {
+      const dup = await duplicateSupplierBill(client, { storePk, doc, localId, stored: stored ? stored.doc : null });
+      if (dup) flags.push(dup);
+    }
     if (ev.collection === 'medicines') {
       // Stock moves only through ledger lines (stock events), never through the figure a
       // device happens to hold: that figure already includes its own unsent movements.
@@ -343,8 +382,11 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
     doc.updated_at = new Date().toISOString();
     doc.device_id = doc.device_id || device.install_id;
     bundle = { [ev.collection]: [doc] };
-    if (ev.stock_ops.length) {
-      bundle.stock_operations = ev.stock_ops.map((o) => ({ ...o, device_id: o.device_id || device.install_id }));
+    if (ev.stock_ops.length || fix.length) {
+      bundle.stock_operations = [
+        ...ev.stock_ops.map((o) => ({ ...o, device_id: o.device_id || device.install_id })),
+        ...fix,
+      ];
     }
   }
 
@@ -380,8 +422,24 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
     flag_code: flags.map((f) => f[0]).join(',') || null,
     flag_detail: flags.map((f) => f[1]).join(' | ') || null,
     replaced,
+    fix,
+    kept_deleted: keptDeleted,
     result: main,
   };
+}
+
+/** The parts of an event's outcome a newer device acts on (older devices ignore them):
+ *  replaced -- this edit overwrote another device's copy (its version named);
+ *  stock_fix -- stock the server put back with it; kept_deleted -- the record is held deleted. */
+function clashAnswer(r) {
+  const out = {};
+  if (r.replaced) {
+    out.replaced = true;
+    out.replaced_version = Number(r.replaced.version || 0) || null;
+  }
+  if (r.fix?.length) out.stock_fix = r.fix.map((o) => ({ medicine_id: o.medicine_id, qty_delta: o.qty_delta }));
+  if (r.kept_deleted) out.kept_deleted = true;
+  return out;
 }
 
 export async function pushEvents(storePk, { installId, events, wipeGeneration = null } = {}) {
@@ -451,6 +509,7 @@ export async function pushEvents(storePk, { installId, events, wipeGeneration = 
         flag_code: r.flag_code || null,
         flag_detail: r.flag_detail || null,
         result: r.result || null,
+        ...clashAnswer(r),
       });
     }
     await client.query(
