@@ -99,3 +99,12 @@ CREATE TABLE IF NOT EXISTS sync_check_items (
   detail     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sync_check_items_run ON sync_check_items (run_id);
+
+-- "Delete all data" of one store (services/storeWipe.js, Oct 2026). Every device compares its own
+-- wipe_generation with the store's (/sync/status, /sync/changes, /sync/v2/register carry it) and
+-- clears its copy when the store's is higher; /sync/v2/push refuses a device that has not.
+ALTER TABLE store_sync_state ADD COLUMN IF NOT EXISTS wipe_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE store_sync_state ADD COLUMN IF NOT EXISTS wipe_revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE store_sync_state ADD COLUMN IF NOT EXISTS wiped_at TIMESTAMPTZ;
+ALTER TABLE store_sync_state ADD COLUMN IF NOT EXISTS wipe_request_id TEXT;
+ALTER TABLE store_sync_state ADD COLUMN IF NOT EXISTS wipe_also_profile BOOLEAN NOT NULL DEFAULT FALSE;

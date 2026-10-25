@@ -30,6 +30,7 @@ import {
   reserveNumberBlockInTx,
 } from './syncService.js';
 import { ensureStoreSyncState, newSyncHint } from './syncRevision.js';
+import { assertDeviceSawWipe, storeWipeState } from './storeWipe.js';
 
 /** device_no * 1e9 stays an exact integer in JavaScript and Kotlin up to here (9e12 < 2^53). */
 export const MAX_DEVICE_NO = 9000;
@@ -100,7 +101,8 @@ export async function registerDevice(storePk, { installId, deviceType, deviceNam
         [row.id, cleanText(deviceType, 16), cleanText(deviceName, 64), cleanText(appVersion, 32)],
       ));
     }
-    return { ...devicePayload(row), ...(await deviceFloors(client, storePk, Number(row.device_no))) };
+    const wipe = await storeWipeState(storePk, client);
+    return { ...devicePayload(row), ...(await deviceFloors(client, storePk, Number(row.device_no))), ...wipe };
   });
 }
 
@@ -382,7 +384,7 @@ async function applyEvent(client, storePk, device, ev, hint, deleteBase) {
   };
 }
 
-export async function pushEvents(storePk, { installId, events } = {}) {
+export async function pushEvents(storePk, { installId, events, wipeGeneration = null } = {}) {
   const dev = await deviceRow(storePk, installId);
   const device = { ...dev, ...devicePayload(dev) };
   const list = (Array.isArray(events) ? events : []).map(normalizeEvent).sort((a, b) => a.seq - b.seq);
@@ -400,6 +402,8 @@ export async function pushEvents(storePk, { installId, events } = {}) {
   const out = await withTransaction(async (client) => {
     await lockStorePush(client, storePk);
     await ensureStoreSyncState(client, storePk);
+    // After "Delete all data" (storeWipe.js) an outbox made on the old records must never land.
+    await assertDeviceSawWipe(client, storePk, wipeGeneration);
     const { rows } = await client.query(
       `SELECT last_seq FROM sync_devices WHERE id=$1 FOR UPDATE`, [dev.id],
     );
@@ -575,7 +579,7 @@ export async function deviceStatus(storePk, installId) {
        (SELECT head_revision FROM store_sync_state WHERE store_pk=$1) AS head_revision`,
     [storePk, dev.device_no],
   );
-  return { ...devicePayload(dev), ...rows[0] };
+  return { ...devicePayload(dev), ...rows[0], ...(await storeWipeState(storePk)) };
 }
 
 export async function listFlags(storePk, { open = true, limit = 200 } = {}) {

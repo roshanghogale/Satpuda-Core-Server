@@ -143,9 +143,19 @@ export function newSyncHint(storePk) {
   };
 }
 
+/** "Delete all data" (services/storeWipe.js): SELECT * so a table without the wipe columns
+ *  answers 0 / 0. */
+function wipeFields(row) {
+  return {
+    wipe_generation: Number(row?.wipe_generation || 0),
+    wipe_revision: Number(row?.wipe_revision || 0),
+    wipe_also_profile: Boolean(row?.wipe_also_profile),
+  };
+}
+
 export async function getSyncStatus(storePk) {
   const { rows } = await query(
-    `SELECT head_revision FROM store_sync_state WHERE store_pk = $1`,
+    `SELECT * FROM store_sync_state WHERE store_pk = $1`,
     [storePk]
   );
   if (!rows[0]) {
@@ -155,11 +165,12 @@ export async function getSyncStatus(storePk) {
        ON CONFLICT (store_pk) DO NOTHING`,
       [storePk]
     );
-    return { head_revision: 0, server_time: new Date().toISOString() };
+    return { head_revision: 0, server_time: new Date().toISOString(), ...wipeFields(null) };
   }
   return {
     head_revision: Number(rows[0].head_revision || 0),
     server_time: new Date().toISOString(),
+    ...wipeFields(rows[0]),
   };
 }
 
@@ -274,12 +285,16 @@ export async function getChanges(storePk, { after = 0, limit = 200 } = {}) {
 
   const fromRevision = changes.length ? changes[0].revision : afterRev;
   const toRevision = changes.length ? changes[changes.length - 1].revision : afterRev;
+  // Every page says which "Delete all data" the store is on, so a device that pulls learns
+  // of a wipe without asking separately (one primary-key read).
+  const { rows: st } = await query(`SELECT * FROM store_sync_state WHERE store_pk = $1`, [storePk]);
 
   return {
     from_revision: fromRevision,
     to_revision: toRevision,
     changes,
     has_more: hasMore,
+    ...wipeFields(st[0]),
   };
 }
 

@@ -1,5 +1,8 @@
 import { Router } from 'express';
-import { asyncHandler, ok } from '../utils/http.js';
+import jwt from 'jsonwebtoken';
+import { config } from '../config/index.js';
+import { AppError, asyncHandler, ok } from '../utils/http.js';
+import { announceWipe, storeWipePreview, wipeStoreData } from '../services/storeWipe.js';
 import { requireStore, resolveStorePk } from '../middleware/auth.js';
 import {
   deviceStatus,
@@ -50,7 +53,11 @@ router.get('/number-head', asyncHandler(async (req, res) => {
 
 router.post('/push', asyncHandler(async (req, res) => {
   const b = req.body || {};
-  ok(res, await pushEvents(await resolveStorePk(req), { installId: b.install_id, events: b.events }));
+  ok(res, await pushEvents(await resolveStorePk(req), {
+    installId: b.install_id,
+    events: b.events,
+    wipeGeneration: b.wipe_generation,
+  }));
 }));
 
 router.get('/status', asyncHandler(async (req, res) => {
@@ -75,6 +82,61 @@ router.get('/flags', asyncHandler(async (req, res) => {
 
 router.post('/flags/:id/resolve', asyncHandler(async (req, res) => {
   ok(res, await resolveFlag(await resolveStorePk(req), req.params.id, (req.body || {}).note));
+}));
+
+/**
+ * "Delete all data" (services/storeWipe.js). The store is the one in the caller's STORE token --
+ * never a body field, so a device can only ever wipe its own store -- and the caller must also
+ * hand over a vendor ADMINISTRATOR token (admin_token): a shop device alone, whose store token
+ * sits on every PC and phone of the shop, cannot wipe the server.
+ */
+function wipeCaller(req) {
+  if (req.auth?.type !== 'store') {
+    throw new AppError(403, 'Delete all data is sent by a device of the store, with its store token');
+  }
+  return req.auth.storePk;
+}
+
+function adminFromBody(req) {
+  const raw = String((req.body || {}).admin_token || '').trim();
+  if (!raw) {
+    throw new AppError(401, 'The Satpuda administrator sign-in is needed to delete all data', {
+      code: 'admin_credential_required',
+    });
+  }
+  let payload;
+  try {
+    payload = jwt.verify(raw, config.jwtSecret);
+  } catch {
+    throw new AppError(401, 'The administrator sign-in has expired; sign in again', {
+      code: 'admin_credential_required',
+    });
+  }
+  if (payload?.typ !== 'admin') throw new AppError(403, 'An administrator sign-in is needed');
+  return payload.username || String(payload.sub || '');
+}
+
+/** What would go, and which devices it reaches. Read-only; the store token is enough. */
+router.get('/store-wipe/preview', asyncHandler(async (req, res) => {
+  const pk = wipeCaller(req);
+  const also = req.query.also_profile === '1' || req.query.also_profile === 'true';
+  ok(res, await storeWipePreview(pk, { alsoProfile: also }));
+}));
+
+router.post('/store-wipe', asyncHandler(async (req, res) => {
+  const pk = wipeCaller(req);
+  const actor = adminFromBody(req);
+  const b = req.body || {};
+  const result = await wipeStoreData(pk, {
+    confirm: b.confirm,
+    alsoProfile: b.also_profile === true || b.also_profile === 'true' || b.also_profile === 1,
+    requestId: b.request_id,
+    expectStoreId: b.store_id,
+    actorId: actor,
+    deviceId: req.auth?.deviceId || null,
+  });
+  await announceWipe(pk, result);
+  ok(res, result);
 }));
 
 export default router;

@@ -222,6 +222,9 @@ export function broadcastSyncHint(
     source_device_id = null,
     changes = [],
     full_refresh = false,
+    wipe_generation = null,
+    wipe_revision = null,
+    wipe_also_profile = false,
   } = {},
 ) {
   const set = storeSockets.get(Number(storePk));
@@ -234,6 +237,8 @@ export function broadcastSyncHint(
     source_device_id: source_device_id || null,
     changes: overflow || full_refresh ? [] : list.slice(0, SYNC_HINT_MAX_CHANGES),
     full_refresh: Boolean(full_refresh || overflow),
+    // "Delete all data" (services/storeWipe.js): the devices clear their copy of the store.
+    ...(wipe_generation != null ? { wipe_generation: Number(wipe_generation), wipe_revision: Number(wipe_revision || 0), wipe_also_profile: Boolean(wipe_also_profile) } : {}),
   });
   const src = source_device_id || null;
   for (const ws of set) {
