@@ -29,7 +29,9 @@ button, input, select { font: inherit; }
 
 .app-shell {
   display: grid;
-  grid-template-columns: 240px 1fr;
+  /* minmax(0, 1fr), not 1fr: a wide table made the main column as wide as the table, so its
+     right-hand columns went off the screen with no way to scroll to them (owner, 26 Oct 2026). */
+  grid-template-columns: 240px minmax(0, 1fr);
   min-height: 100%;
 }
 
@@ -68,7 +70,7 @@ button, input, select { font: inherit; }
 .nav-link:hover { background: var(--bg3); color: var(--text); }
 .nav-link.active { background: rgba(45, 212, 168, 0.12); color: var(--accent); }
 
-.main { padding: 24px 28px 48px; overflow: auto; }
+.main { padding: 24px 28px 48px; overflow: auto; min-width: 0; }
 
 .page-title {
   display: flex;
@@ -370,3 +372,13 @@ table { min-width: max-content; }
    not look like the buttons beside it. */
 .btn.danger { color: var(--danger); border-color: rgba(240, 113, 120, 0.4); }
 .btn.danger:hover { background: rgba(240, 113, 120, 0.12); border-color: var(--danger); }
+
+/* Stores: the whole table fits a normal screen - long ids and keys wrap instead of pushing the
+   Turn off / Details buttons out of sight. */
+table.stores-table { min-width: 100%; }
+table.stores-table td:first-child .mono, table.stores-table td.key { word-break: break-all; }
+table.stores-table td.key { max-width: 170px; font-size: 0.78rem; }
+table.stores-table td { white-space: normal; }
+table.stores-table td.mono:not(.key), table.stores-table td.right { white-space: nowrap; }
+.store-search { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
+.store-search input { flex: 1; max-width: 420px; }

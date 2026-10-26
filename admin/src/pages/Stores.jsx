@@ -10,6 +10,7 @@ export default function Stores() {
   const [saving, setSaving] = useState(false);
   const [trialsOnly, setTrialsOnly] = useState(false);
   const [busy, setBusy] = useState(0);
+  const [search, setSearch] = useState('');
 
   async function load() {
     try {
@@ -54,7 +55,16 @@ export default function Stores() {
   // Set up from the installer: a store_provisions row (the old trials, and the
   // main stores the installer makes now, with their 3-day licence).
   const fromInstaller = (s) => Boolean(s.provisioned_trial || s.trial_device_id);
-  const shown = trialsOnly ? stores.filter(fromInstaller) : stores;
+  // Search by any part of the name, store id, pairing key, the retail store a wholesale store
+  // belongs to, or the installer's address; every word typed must match.
+  const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const matches = (s) => {
+    if (!words.length) return true;
+    const hay = [s.store_name, s.store_id, s.android_key, s.parent_store_name, s.trial_ip, s.store_kind, s.app_mode]
+      .map((v) => String(v || '').toLowerCase()).join(' ');
+    return words.every((w) => hay.includes(w));
+  };
+  const shown = (trialsOnly ? stores.filter(fromInstaller) : stores).filter(matches);
 
   return (
     <>
@@ -90,9 +100,22 @@ export default function Stores() {
         </form>
       )}
 
+      <div className="store-search">
+        <input
+          type="search"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search stores: name, store id, pairing key…"
+          autoFocus
+        />
+        <span className="muted" style={{ fontSize: '0.85rem' }}>
+          {shown.length} of {stores.length}
+        </span>
+      </div>
+
       <div className="panel">
         <div className="panel-b">
-          <table>
+          <table className="stores-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -130,7 +153,7 @@ export default function Stores() {
                       </div>
                     )}
                   </td>
-                  <td className="mono">{s.android_key}</td>
+                  <td className="mono key">{s.android_key}</td>
                   <td>
                     <span className={`badge ${s.is_active ? 'ok' : 'off'}`}>
                       {s.is_active ? s.app_mode : 'OFF'}
@@ -163,7 +186,7 @@ export default function Stores() {
                   </td>
                 </tr>
               ))}
-              {!shown.length && <tr><td colSpan={7} className="empty">No stores</td></tr>}
+              {!shown.length && <tr><td colSpan={7} className="empty">{words.length ? 'No store matches the search' : 'No stores'}</td></tr>}
             </tbody>
           </table>
         </div>
