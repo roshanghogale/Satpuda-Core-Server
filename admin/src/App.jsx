@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { api, clearToken, getToken, setToken } from './api.js';
 import Overview from './pages/Overview.jsx';
@@ -7,6 +7,8 @@ import StoreDetail from './pages/StoreDetail.jsx';
 import MasterMedicines from './pages/MasterMedicines.jsx';
 import DemoLogins from './pages/DemoLogins.jsx';
 import Trials from './pages/Trials.jsx';
+import MasterReview from './pages/MasterReview.jsx';
+import { ThemeSwitch } from './theme.jsx';
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('admin');
@@ -35,6 +37,7 @@ function Login({ onLogin }) {
 
   return (
     <div className="login-wrap">
+      <ThemeSwitch />
       <form className="login-card" onSubmit={submit}>
         <h1>Satpuda Core</h1>
         <p className="sub">Admin dashboard — multi-store control</p>
@@ -55,7 +58,29 @@ function Login({ onLogin }) {
   );
 }
 
+// On a phone the tables show as cards; each cell needs its column's name to say what the value is.
+function labelCells(root) {
+  root.querySelectorAll('table').forEach((t) => {
+    const names = [...t.querySelectorAll('thead th')].map((th) => th.textContent.trim());
+    if (!names.length) return;
+    t.querySelectorAll('tbody tr').forEach((tr) => {
+      [...tr.children].forEach((td, i) => {
+        if (names[i] && td.getAttribute('data-label') !== names[i]) td.setAttribute('data-label', names[i]);
+      });
+    });
+  });
+}
+
 function Shell({ admin, onLogout, children }) {
+  const mainRef = useRef(null);
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return undefined;
+    labelCells(el);
+    const obs = new MutationObserver(() => labelCells(el));
+    obs.observe(el, { childList: true, subtree: true });
+    return () => obs.disconnect();
+  }, []);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -78,10 +103,18 @@ function Shell({ admin, onLogout, children }) {
         <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/demo-logins">
           Demo logins
         </NavLink>
+        <NavLink className={({ isActive }) => `nav-link${isActive ? ' active' : ''}`} to="/master-list-check">
+          Master list check
+        </NavLink>
         <div style={{ flex: 1 }} />
         <button className="btn ghost sm" onClick={onLogout}>Sign out</button>
       </aside>
-      <main className="main">{children}</main>
+      <main className="main" ref={mainRef}>
+        <div className="topbar">
+          <ThemeSwitch />
+        </div>
+        {children}
+      </main>
     </div>
   );
 }
@@ -123,6 +156,7 @@ export default function App() {
         <Route path="/trials" element={<Trials />} />
         <Route path="/master-medicines" element={<MasterMedicines />} />
         <Route path="/demo-logins" element={<DemoLogins />} />
+        <Route path="/master-list-check" element={<MasterReview />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Shell>

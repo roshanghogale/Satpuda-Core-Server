@@ -50,7 +50,21 @@ function rowToDoc(r) {
     device_id: r.device_id,
     deleted: r.deleted,
     sync_status: r.sync_status || 'synced',
+    checked_fields: r.checked_fields || '',
   };
+}
+
+// A field of a global row that the master list check confirmed (checked_fields, a comma list of
+// these names) keeps its value when a shop pushes its own; the admin panel may still change it.
+const CHECKED_COLUMNS = {
+  content: 'content_drug', manufacturer: 'manufacturer', schedule: 'schedule', hsn: 'hsn_code',
+  gst: 'gst_percent', type: 'med_type', pack: 'pack_size',
+};
+
+function lockedColumns(existing, doc) {
+  if (doc?._admin) return new Set();
+  return new Set(String(existing?.checked_fields || '').split(',')
+    .map((f) => CHECKED_COLUMNS[f.trim()]).filter(Boolean));
 }
 
 async function findGlobalByName(client, name) {
@@ -90,6 +104,7 @@ export async function upsertGlobalMasterDoc(client, doc) {
       return { id: existing.id, name, status: 'skipped' };
     }
 
+    const locked = lockedColumns(existing, doc);
     const next = {
       name,
       manufacturer: pickText(doc.manufacturer, existing.manufacturer),
@@ -101,6 +116,7 @@ export async function upsertGlobalMasterDoc(client, doc) {
       hsn_code: pickText(doc.hsn_code ?? doc.hsn, existing.hsn_code),
       gst_percent: pickNum(doc.gst_percent ?? doc.gst_pct, existing.gst_percent),
     };
+    for (const col of locked) next[col] = existing[col];
 
     const version = forceEnrich
       ? Math.max(Number(existing.version || 1), Number(meta.version || 1)) + (gate === 'skip' ? 1 : 0)
@@ -167,7 +183,7 @@ export async function upsertGlobalMasterDoc(client, doc) {
   return { id: rows[0].id, name, status: 'upserted', version: Number(meta.version || 1) };
 }
 
-export async function upsertGlobalMasterBatch(docs, { enrich = false } = {}) {
+export async function upsertGlobalMasterBatch(docs, { enrich = false, admin = false } = {}) {
   if (!Array.isArray(docs) || !docs.length) {
     return { results: [], upserted: 0, skipped: 0 };
   }
@@ -176,7 +192,9 @@ export async function upsertGlobalMasterBatch(docs, { enrich = false } = {}) {
     let upserted = 0;
     let skipped = 0;
     for (const raw of docs) {
-      const doc = enrich ? { ...raw, _enrich: true } : raw;
+      // _admin only from the admin route, never from what a shop sent
+      const { _admin: _ignored, ...sent } = raw || {};
+      const doc = { ...sent, ...(enrich ? { _enrich: true } : {}), ...(admin ? { _admin: true } : {}) };
       try {
         const r = await upsertGlobalMasterDoc(client, doc);
         results.push(r);

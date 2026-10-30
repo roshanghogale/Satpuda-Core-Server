@@ -26,6 +26,37 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
 app.set('trust proxy', 1);
+
+// The master list check dashboard is a separate app (/opt/satpuda-master-review, 127.0.0.1:3210, sign-in =
+// this server's admin login). Caddy sends srv1970994.hstgr.cloud/master-review to it directly; this does the
+// same for the hostnames that reach this process without Caddy (api.satpudacore.online through the tunnel),
+// so the admin panel's link works there too. Not offered on the shops' address or the demo. Mounted before
+// the body parsers so the request body goes through untouched.
+const MASTER_REVIEW_PORT = 3210;
+const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-connection']);
+app.use('/master-review', (req, res, next) => {
+  const host = String(req.hostname || '').toLowerCase();
+  if (WEB_HOSTS.has(host) || DEMO_HOSTS.has(host)) return next();
+  if (req.originalUrl === '/master-review') return res.redirect(302, '/master-review/');
+  const headers = { ...req.headers, host: `127.0.0.1:${MASTER_REVIEW_PORT}` };
+  for (const h of HOP_BY_HOP) delete headers[h];
+  const upstream = http.request(
+    { host: '127.0.0.1', port: MASTER_REVIEW_PORT, method: req.method, path: req.url || '/', headers },
+    (up) => {
+      const out = { ...up.headers };
+      for (const h of HOP_BY_HOP) delete out[h];
+      res.writeHead(up.statusCode || 502, out);
+      up.pipe(res);
+    }
+  );
+  upstream.setTimeout(120000, () => upstream.destroy());
+  upstream.on('error', () => {
+    if (!res.headersSent) res.status(502).json({ ok: false, error: 'The master list check is not running.' });
+    else res.end();
+  });
+  req.pipe(upstream);
+});
+
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(compression({ threshold: 1024 }));
 app.use(

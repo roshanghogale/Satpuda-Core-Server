@@ -72,13 +72,50 @@ function devicePayload(row) {
   };
 }
 
-async function deviceRow(storePk, installId) {
-  const { rows } = await query(
-    `SELECT * FROM sync_devices WHERE store_pk=$1 AND install_id=$2`,
-    [storePk, cleanInstallId(installId)],
-  );
-  if (!rows[0]) throw new AppError(404, 'This device is not registered for sync v2 yet', { code: 'not_registered' });
-  return rows[0];
+// "storePk:sent id" -> the registered install_id it turned out to be (see deviceRow).
+const _driftAlias = new Map();
+
+/** The one registered id a push's own records name: a PC stamps every record it sends with
+ *  the id it registered with (mac2 outbox.build_events), whatever id it sends the push under. */
+function recordDeviceIds(events) {
+  const ids = new Set();
+  for (const ev of Array.isArray(events) ? events : []) {
+    const d = ev && typeof ev.doc === 'object' && ev.doc ? String(ev.doc.device_id ?? '').trim() : '';
+    if (d && INSTALL_RX.test(d)) ids.add(d);
+  }
+  return ids.size === 1 ? [...ids] : [];
+}
+
+/** The device's row. A PC works its id out again from its hardware, and when that changes
+ *  (store 131, 26 Oct 2026; store 148, 28 Oct) it sends a new id the
+ *  server never registered -- every push answered 404 and the shop's bills stayed on the PC.
+ *  The same machine is still known by the id in its store login (pairedId, until the login
+ *  renews under the new id) and by the id stamped on the records it pushes (recordIds); one
+ *  of those registered in THIS store is used, and remembered for its number-block calls. */
+async function deviceRow(storePk, installId, { pairedId = null, recordIds = [] } = {}) {
+  const id = cleanInstallId(installId);
+  const byId = async (x) => (await query(
+    `SELECT * FROM sync_devices WHERE store_pk=$1 AND install_id=$2`, [storePk, x],
+  )).rows[0];
+  const direct = await byId(id);
+  if (direct) return direct;
+  const key = `${storePk}:${id}`;
+  const tries = [
+    [_driftAlias.get(key), 'remembered'],
+    [String(pairedId ?? '').trim(), 'login'],
+    ...recordIds.map((r) => [r, 'its records']),
+  ];
+  for (const [cand, how] of tries) {
+    if (!cand || cand === id || !INSTALL_RX.test(cand)) continue;
+    const row = await byId(cand);
+    if (!row) continue;
+    if (_driftAlias.get(key) !== cand) {
+      _driftAlias.set(key, cand);
+      console.warn(`[sync-v2] store ${storePk}: device sent ${id}, registered as ${cand} (by ${how}) -- using that`);
+    }
+    return row;
+  }
+  throw new AppError(404, 'This device is not registered for sync v2 yet', { code: 'not_registered' });
 }
 
 export async function registerDevice(storePk, { installId, deviceType, deviceName, appVersion } = {}) {
@@ -241,8 +278,8 @@ export async function numberHead(storePk, { fyStartYear, sales, purchases } = {}
   return out;
 }
 
-export async function reserveNumberBlock(storePk, { installId, kind, fyStartYear, size } = {}) {
-  const dev = await deviceRow(storePk, installId);
+export async function reserveNumberBlock(storePk, { installId, kind, fyStartYear, size, pairedId = null } = {}) {
+  const dev = await deviceRow(storePk, installId, { pairedId });
   if (!['sales', 'purchases'].includes(kind)) throw new AppError(400, 'kind must be sales|purchases');
   return withTransaction((client) => reserveNumberBlockInTx(client, storePk, {
     kind, fyStartYear, deviceNo: dev.device_no, size,
@@ -442,8 +479,8 @@ function clashAnswer(r) {
   return out;
 }
 
-export async function pushEvents(storePk, { installId, events, wipeGeneration = null } = {}) {
-  const dev = await deviceRow(storePk, installId);
+export async function pushEvents(storePk, { installId, events, wipeGeneration = null, pairedId = null } = {}) {
+  const dev = await deviceRow(storePk, installId, { pairedId, recordIds: recordDeviceIds(events) });
   const device = { ...dev, ...devicePayload(dev) };
   const list = (Array.isArray(events) ? events : []).map(normalizeEvent).sort((a, b) => a.seq - b.seq);
   if (list.length > MAX_EVENTS_PER_PUSH) list.length = MAX_EVENTS_PER_PUSH;
@@ -616,8 +653,8 @@ export async function applyServerSideSave(storePk, { installId, deviceType = 'we
 }
 
 /** What the server holds from this device: the "sent / held" proof on the device's screen. */
-export async function deviceStatus(storePk, installId) {
-  const dev = await deviceRow(storePk, installId);
+export async function deviceStatus(storePk, installId, pairedId = null) {
+  const dev = await deviceRow(storePk, installId, { pairedId });
   // Bills this device MADE (its create events), as the server holds them now -- not bills
   // whose last editor it was.
   const { rows } = await query(

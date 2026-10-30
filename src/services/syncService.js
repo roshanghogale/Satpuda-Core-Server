@@ -103,12 +103,16 @@ export function parseTabletsPerStripe(unitStr) {
   return digits ? Math.max(1, parseInt(digits[0], 10) || 0) : 0;
 }
 
-function purchaseItemPack(it, medUnit) {
+export function purchaseItemPack(it, medUnit) {
   let unit = String(
     it?.unit || it?.quantity_value || it?.pack || medUnit || '',
   ).trim();
   let tps = Number(it?.tablets_per_stripe ?? it?.tablets_per_strip ?? 0);
   if (!Number.isFinite(tps) || tps <= 0) tps = parseTabletsPerStripe(unit);
+  // A pack of 1 beside a unit that names a strip ("20'", "15'S", "10TAB"): the unit is right.
+  // A loose line sends unit "1" as well. Older clients sent 1 here and the line was counted
+  // as one tablet per strip (stores 131 / 139, Sep-Oct 2026).
+  else if (tps === 1 && parseTabletsPerStripe(unit) > 1) tps = parseTabletsPerStripe(unit);
   if (!unit && tps > 0) unit = String(tps);
   return {
     unit: unit || null,

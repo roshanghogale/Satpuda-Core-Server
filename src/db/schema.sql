@@ -790,6 +790,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_med_master_store_local
 CREATE UNIQUE INDEX IF NOT EXISTS idx_med_master_global_name
   ON medicines_master (LOWER(TRIM(name)))
   WHERE store_pk IS NULL AND NOT deleted;
+-- The fields of a global row checked against the official rules and the web (the master list
+-- check, 30 Oct 2026): "content,manufacturer,schedule,hsn,gst,type,pack" or a part of it. A
+-- shop's push never overwrites these; the PCs let them win over a shop's own value.
+ALTER TABLE medicines_master ADD COLUMN IF NOT EXISTS checked_fields TEXT NOT NULL DEFAULT '';
+-- The PCs' incremental pull pages the global rows by (updated_at, id)
+CREATE INDEX IF NOT EXISTS idx_med_master_global_updated
+  ON medicines_master (updated_at, id) WHERE store_pk IS NULL;
 
 -- FY serial allocation lock table (atomic next serial)
 CREATE TABLE IF NOT EXISTS fy_serials (

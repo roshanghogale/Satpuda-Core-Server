@@ -78,14 +78,15 @@ router.post('/upsert', asyncHandler(async (req, res) => {
         ? body
         : null;
   if (!docs) throw new AppError(400, 'docs array required');
-  const enrich = !!(body.enrich || body._enrich);
-  // Stamp device_id from auth when missing
-  const deviceId = req.auth?.deviceId || null;
-  const stamped = docs.map((d) => ({
-    ...d,
-    device_id: d.device_id || deviceId,
-  }));
-  ok(res, await master.upsertGlobalMasterBatch(stamped, { enrich }));
+  // Owner, 30 Oct 2026: no shop PC changes the global master any more -- it changes only after
+  // the master list check (official rules, the web, hand checks) or from the admin panel. Older
+  // PCs still send their stock here: answered as before (nothing written), so they do not retry.
+  ok(res, {
+    results: docs.map((d) => ({ name: d?.name, status: 'skipped', reason: 'master is read-only for shops' })),
+    upserted: 0,
+    skipped: docs.length,
+    read_only: true,
+  });
 }));
 
 router.get('/stats', asyncHandler(async (_req, res) => {

@@ -38,6 +38,7 @@ router.post('/number-block', asyncHandler(async (req, res) => {
     kind: b.kind,
     fyStartYear: b.fy_start_year,
     size: b.size,
+    pairedId: req.auth?.deviceId,
   }));
 }));
 
@@ -57,11 +58,12 @@ router.post('/push', asyncHandler(async (req, res) => {
     installId: b.install_id,
     events: b.events,
     wipeGeneration: b.wipe_generation,
+    pairedId: req.auth?.deviceId,
   }));
 }));
 
 router.get('/status', asyncHandler(async (req, res) => {
-  ok(res, await deviceStatus(await resolveStorePk(req), req.query.install_id));
+  ok(res, await deviceStatus(await resolveStorePk(req), req.query.install_id, req.auth?.deviceId));
 }));
 
 router.post('/stock', asyncHandler(async (req, res) => {

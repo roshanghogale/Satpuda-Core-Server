@@ -13,6 +13,56 @@
   --radius: 10px;
   --font: 'DM Sans', system-ui, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --on-accent: #06281f;
+  --accent-soft: rgba(45, 212, 168, 0.12);
+  --accent-line: rgba(45, 212, 168, 0.35);
+  --warn-soft: rgba(240, 180, 41, 0.1);
+  --warn-line: rgba(240, 180, 41, 0.35);
+  --danger-soft: rgba(240, 113, 120, 0.12);
+  --danger-line: rgba(240, 113, 120, 0.4);
+  --danger-text: #ffb4b8;
+  --hover: rgba(255, 255, 255, 0.02);
+  --glow-1: rgba(45, 212, 168, 0.12);
+  --glow-2: rgba(91, 159, 212, 0.1);
+  color-scheme: dark;
+}
+
+/* Themes (buttons at the top; kept in this browser). Blue = the colours above, the default. */
+:root[data-theme="dark"] {
+  --bg: #111213;
+  --bg2: #191a1c;
+  --bg3: #222427;
+  --line: #313338;
+  --text: #ececec;
+  --muted: #9b9ea4;
+  --hover: rgba(255, 255, 255, 0.03);
+  --glow-1: rgba(45, 212, 168, 0.06);
+  --glow-2: rgba(255, 255, 255, 0.03);
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f3f5f7;
+  --bg2: #ffffff;
+  --bg3: #eef1f4;
+  --line: #d8dee4;
+  --text: #15202b;
+  --muted: #5b6875;
+  --accent: #0a8566;
+  --accent2: #076b52;
+  --warn: #9a6a00;
+  --danger: #c23b45;
+  --info: #2a69a3;
+  --on-accent: #ffffff;
+  --accent-soft: rgba(10, 133, 102, 0.1);
+  --accent-line: rgba(10, 133, 102, 0.35);
+  --warn-soft: rgba(154, 106, 0, 0.1);
+  --warn-line: rgba(154, 106, 0, 0.35);
+  --danger-soft: rgba(194, 59, 69, 0.08);
+  --danger-line: rgba(194, 59, 69, 0.4);
+  --danger-text: #9b2c33;
+  --hover: rgba(0, 0, 0, 0.03);
+  --glow-1: rgba(10, 133, 102, 0.08);
+  --glow-2: rgba(42, 105, 163, 0.06);
 }
 
 * { box-sizing: border-box; }
@@ -68,7 +118,7 @@ button, input, select { font: inherit; }
   font-weight: 500;
 }
 .nav-link:hover { background: var(--bg3); color: var(--text); }
-.nav-link.active { background: rgba(45, 212, 168, 0.12); color: var(--accent); }
+.nav-link.active { background: var(--accent-soft); color: var(--accent); }
 
 .main { padding: 24px 28px 48px; overflow: auto; min-width: 0; }
 
@@ -141,7 +191,7 @@ th {
   letter-spacing: 0.04em;
   background: var(--bg3);
 }
-tr:hover td { background: rgba(255,255,255,0.02); }
+tr:hover td { background: var(--hover); }
 .mono { font-family: var(--mono); font-size: 0.82rem; }
 .muted { color: var(--muted); }
 .right { text-align: right; }
@@ -155,8 +205,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   color: var(--muted);
   border: 1px solid var(--line);
 }
-.badge.ok { color: var(--accent); border-color: rgba(45,212,168,0.35); background: rgba(45,212,168,0.1); }
-.badge.warn { color: var(--warn); border-color: rgba(240,180,41,0.35); background: rgba(240,180,41,0.1); }
+.badge.ok { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.badge.warn { color: var(--warn); border-color: var(--warn-line); background: var(--warn-soft); }
 .badge.off { color: var(--danger); }
 
 .btn {
@@ -173,7 +223,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #06281f;
+  color: var(--on-accent);
   font-weight: 600;
 }
 .btn.primary:hover { background: var(--accent2); border-color: var(--accent2); }
@@ -232,8 +282,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   display: grid;
   place-items: center;
   background:
-    radial-gradient(ellipse at 20% 10%, rgba(45,212,168,0.12), transparent 45%),
-    radial-gradient(ellipse at 80% 90%, rgba(91,159,212,0.1), transparent 40%),
+    radial-gradient(ellipse at 20% 10%, var(--glow-1), transparent 45%),
+    radial-gradient(ellipse at 80% 90%, var(--glow-2), transparent 40%),
     var(--bg);
 }
 .login-card {
@@ -246,9 +296,9 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 .login-card h1 { margin: 0 0 4px; font-size: 1.35rem; }
 .login-card .sub { color: var(--muted); margin: 0 0 22px; font-size: 0.9rem; }
 .error {
-  background: rgba(240,113,120,0.12);
-  border: 1px solid rgba(240,113,120,0.35);
-  color: #ffb4b8;
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-line);
+  color: var(--danger-text);
   padding: 10px 12px;
   border-radius: 8px;
   margin-bottom: 12px;
@@ -264,7 +314,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 }
 .spark span {
   flex: 1;
-  background: rgba(45,212,168,0.55);
+  background: var(--accent);
+  opacity: 0.55;
   border-radius: 3px 3px 0 0;
   min-height: 2px;
 }
@@ -304,8 +355,8 @@ tr:hover td { background: rgba(255,255,255,0.02); }
   gap: 6px;
 }
 .chip {
-  background: rgba(45, 212, 168, 0.12);
-  border: 1px solid rgba(45, 212, 168, 0.28);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
   color: var(--text);
   padding: 3px 8px;
   border-radius: 999px;
@@ -370,8 +421,8 @@ table { min-width: max-content; }
 
 /* Delete on the Demo logins page: it removes a person's access, so it should
    not look like the buttons beside it. */
-.btn.danger { color: var(--danger); border-color: rgba(240, 113, 120, 0.4); }
-.btn.danger:hover { background: rgba(240, 113, 120, 0.12); border-color: var(--danger); }
+.btn.danger { color: var(--danger); border-color: var(--danger-line); }
+.btn.danger:hover { background: var(--danger-soft); border-color: var(--danger); }
 
 /* Stores: the whole table fits a normal screen - long ids and keys wrap instead of pushing the
    Turn off / Details buttons out of sight. */
@@ -382,3 +433,49 @@ table.stores-table td { white-space: normal; }
 table.stores-table td.mono:not(.key), table.stores-table td.right { white-space: nowrap; }
 .store-search { display: flex; gap: 10px; align-items: center; margin-bottom: 12px; }
 .store-search input { flex: 1; max-width: 420px; }
+
+/* Theme buttons at the top of every page (and on the sign-in screen). */
+.topbar { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin: -8px 0 14px; }
+.theme-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; padding: 3px; background: var(--bg2); }
+.theme-switch button {
+  appearance: none; border: 0; background: transparent; color: var(--muted); font-weight: 500;
+  padding: 5px 12px; border-radius: 999px; cursor: pointer; font-size: 0.82rem;
+}
+.theme-switch button:hover { color: var(--text); }
+.theme-switch button.on { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.login-wrap .theme-switch { position: fixed; top: 14px; right: 14px; }
+
+/* Master list check: its own app, shown inside the panel. */
+.embed-frame {
+  display: block; width: 100%; height: calc(100vh - 110px); min-height: 480px;
+  border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg);
+}
+
+@media (max-width: 720px) {
+  .topbar { margin: 0 0 10px; }
+  .theme-switch button { min-height: 36px; padding: 4px 12px; }
+  .embed-frame { height: calc(100dvh - 150px); min-height: 420px; border-radius: 8px; }
+  .page-title { flex-wrap: wrap; align-items: flex-start; }
+  .toolbar input, .toolbar select { min-width: 0; flex: 1 1 100%; }
+  .field[style] { min-width: 0 !important; flex: 1 1 100%; }
+  .store-search { flex-wrap: wrap; }
+  .store-search input { max-width: none; }
+  .panel-h { flex-wrap: wrap; }
+}
+
+/* Phones: every table in the panel becomes a list of cards, one row per card, each value under its
+   column name (the Shell copies the column names onto the cells). */
+@media (max-width: 720px) {
+  .main table { min-width: 0; }
+  .main table thead { display: none; }
+  .main table, .main table tbody, .main table tr, .main table td { display: block; width: 100%; }
+  .main table tr { border-bottom: 1px solid var(--line); padding: 10px 12px; display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 14px; }
+  .main table td:first-child, .main table td[colspan] { grid-column: 1 / -1; }
+  .main table td { border: 0; padding: 3px 0; white-space: normal !important; text-align: left !important; max-width: none !important; }
+  .main table td[data-label]::before {
+    content: attr(data-label); display: block; font-size: 0.68rem; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.04em;
+  }
+  .main table td:empty { display: none; }
+}

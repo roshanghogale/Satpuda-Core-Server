@@ -466,7 +466,8 @@ router.get('/master-medicines/export', asyncHandler(async (_req, res) => {
 
 router.post('/master-medicines/upsert', asyncHandler(async (req, res) => {
   const docs = Array.isArray(req.body?.docs) ? req.body.docs : [];
-  ok(res, await master.upsertGlobalMasterBatch(docs, { enrich: !!req.body?.enrich }));
+  // the admin may change a checked field too (masterMedicineService lockedColumns)
+  ok(res, await master.upsertGlobalMasterBatch(docs, { enrich: !!req.body?.enrich, admin: true }));
 }));
 
 router.post('/master-medicines/merge-from-store/:storePk', asyncHandler(async (req, res) => {
