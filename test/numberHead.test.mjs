@@ -8,7 +8,7 @@
 // No database: a fake client answers the statements these functions send.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { reserveNumberBlockInTx } from '../src/services/syncService.js';
+import { releaseNumberBlockInTx, reserveNumberBlockInTx } from '../src/services/syncService.js';
 import { deviceFloors, numberHead, takenNumbers } from '../src/services/syncV2.js';
 
 const FY = 2026;
@@ -49,13 +49,34 @@ function fakeDb({ sales = [], purchases = [], blocks = [] } = {}) {
         const live = tables[kind].filter((r) => r.store_pk === params[0] && !r.deleted && inFy(r));
         return { rows: live.map((r) => ({ code: r.code })) };
       }
-      if (/MAX\(to_serial\)/.test(s)) {
-        const mine = blocks.filter((b) => b.store_pk === params[0] && b.kind === params[1] && b.fy_start_year === params[2]);
-        return { rows: [{ m: Math.max(0, ...mine.map((b) => b.to_serial)) }] };
+      // Blocks of this store / kind / year; b.held === false is a device not seen for days.
+      const ofYear = () => blocks.filter((b) => b.store_pk === params[0] && b.kind === params[1]
+        && b.fy_start_year === params[2]);
+      if (/MAX\(nb\.to_serial\)/.test(s)) {
+        assert.match(s, /last_seen_at > NOW\(\) - INTERVAL '3 days'/);
+        return { rows: [{ m: Math.max(0, ...ofYear().filter((b) => b.held !== false).map((b) => b.to_serial)) }] };
+      }
+      if (/SELECT nb\.id, nb\.device_no/.test(s)) {                    // releaseStaleBlocks
+        assert.match(s, /AND NOT \(nb\.created_at/);
+        return { rows: ofYear().filter((b) => b.held === false) };
+      }
+      if (/SELECT nb\.from_serial, nb\.to_serial, .* AS held/.test(s)) {  // numberHead
+        return { rows: ofYear().map((b) => ({ ...b, held: b.held !== false })) };
+      }
+      if (/SELECT id, to_serial FROM number_blocks/.test(s)) {            // release by a device
+        return { rows: ofYear().filter((b) => b.device_no === params[3] && b.from_serial === params[4]) };
+      }
+      if (/^DELETE FROM number_blocks WHERE id=\$1/.test(s.trim())) {
+        blocks.splice(blocks.findIndex((b) => b.id === params[0]), 1);
+        return { rows: [] };
+      }
+      if (/^UPDATE number_blocks SET to_serial=\$2 WHERE id=\$1/.test(s.trim())) {
+        blocks.find((b) => b.id === params[0]).to_serial = params[1];
+        return { rows: [] };
       }
       if (/INSERT INTO number_blocks/.test(s)) {
         const [store_pk, kind, fy_start_year, device_no, from_serial, to_serial] = params;
-        blocks.push({ store_pk, kind, fy_start_year, device_no, from_serial, to_serial });
+        blocks.push({ id: blocks.length + 100, store_pk, kind, fy_start_year, device_no, from_serial, to_serial });
         return { rows: [] };
       }
       if (/FROM number_blocks WHERE store_pk=\$1 AND device_no=\$2/.test(s)) {
@@ -126,4 +147,63 @@ test('open_blocks on register carries on after imported bills held only by their
   const db = fakeDb({ sales: imported(120), purchases: imported(1176, 'purchases'), blocks });
   const { open_blocks: open } = await deviceFloors(db, 154, 1);
   assert.deepEqual(open, [{ kind: 'sales', fy_start_year: FY, from_serial: 1, to_serial: 200, next_serial: 121 }]);
+});
+
+// Stores loaded from another program's backup (Oct 2026): a PC used to set the store up, or an
+// install whose id changed, held a block it never printed from; every number after it -- the
+// shop's next bill, the next block -- came after it, so the books had gaps of 50 to 200.
+const blk = (device_no, from_serial, to_serial, extra = {}) => ({
+  id: device_no * 1000 + from_serial, store_pk: 154, kind: 'sales', fy_start_year: FY,
+  device_no, from_serial, to_serial, ...extra,
+});
+
+test('a block of a device not seen for days keeps no numbers back and is given back', async () => {
+  const sales = imported(4656);
+  sales.push(...Array.from({ length: 10 }, (_, i) => ({
+    store_pk: 154, fy_start_year: FY, date: '2026-10-28', fy_serial: 4833 + i, code: `SCB${4833 + i}/FY2026-27` })));
+  const db = fakeDb({ sales, blocks: [
+    blk(2, 4657, 4832, { held: false }),     // gone, never printed: removed
+    blk(3, 4600, 4700, { held: false }),     // gone, imported bills up to 4656 inside: cut back
+    blk(1, 4833, 5032),                      // the shop's PC, in use
+  ] });
+  const next = await reserveNumberBlockInTx(db, 154, { kind: 'sales', fyStartYear: FY, deviceNo: 1, size: 200 });
+  assert.deepEqual([next.from_serial, next.to_serial], [5033, 5232]);   // after the PC's own block
+  assert.equal(db.blocks.find((b) => b.device_no === 2), undefined);
+  assert.equal(db.blocks.find((b) => b.device_no === 3).to_serial, 4656);
+});
+
+test('a block reserved behind a gone device is not printed from: number-head says drop it', async () => {
+  const db = fakeDb({ sales: imported(4973), blocks: [
+    blk(1, 4833, 5032),
+    blk(2, 5033, 5232, { held: false }),
+    blk(1, 5233, 5432),
+  ] });
+  const r = await numberHead(154, { fyStartYear: FY, sales: '4974-5032,5233-5432' }, db);
+  assert.deepEqual(r.sales.ranges.map((x) => x.taken), [0, 5432]);
+  // With the other device about, the same block is next in line and stays.
+  db.blocks[1].held = true;
+  const again = await numberHead(154, { fyStartYear: FY, sales: '4974-5032,5233-5432' }, db);
+  assert.deepEqual(again.sales.ranges.map((x) => x.taken), [0, 0]);
+});
+
+test('number-head: numbers no block holds any more are taken; the next unstarted block is fine', async () => {
+  const purchases = imported(280, 'purchases');
+  const db = fakeDb({ purchases, blocks: [
+    { ...blk(2, 281, 330), kind: 'purchases' },
+    { ...blk(2, 331, 380), kind: 'purchases' },
+  ] });
+  const r = await numberHead(154, { fyStartYear: FY, purchases: '281-330,331-380,1331-1378' }, db);
+  assert.deepEqual(r.purchases.ranges.map((x) => x.taken), [0, 0, 1378]);
+});
+
+test('a device gives a dropped block back: cut to what it printed, removed when nothing', async () => {
+  const db = fakeDb({ sales: imported(4660), blocks: [blk(1, 4633, 4832), blk(1, 5233, 5432)] });
+  const a = await releaseNumberBlockInTx(db, 154, { kind: 'sales', fyStartYear: FY, deviceNo: 1, fromSerial: 4633, nextSerial: 4650 });
+  assert.equal(a.to_serial, 4660);          // never below a number a bill holds in it
+  const b = await releaseNumberBlockInTx(db, 154, { kind: 'sales', fyStartYear: FY, deviceNo: 1, fromSerial: 5233, nextSerial: 5233 });
+  assert.equal(b.to_serial, null);
+  assert.deepEqual(db.blocks.map((x) => [x.from_serial, x.to_serial]), [[4633, 4660]]);
+  const c = await releaseNumberBlockInTx(db, 154, { kind: 'sales', fyStartYear: FY, deviceNo: 2, fromSerial: 4633, nextSerial: 4633 });
+  assert.equal(c.released, false);          // not this device's block
+  await assert.rejects(releaseNumberBlockInTx(db, 154, { kind: 'sales', fyStartYear: FY, deviceNo: 1, fromSerial: 9, nextSerial: 5 }), /next_serial/);
 });

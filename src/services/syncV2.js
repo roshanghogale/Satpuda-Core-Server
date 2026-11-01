@@ -26,8 +26,10 @@ import {
   emitSyncHint,
   fetchDocsByLocalIds,
   lockStorePush,
-  billSerialColumns,
+  heldBlockSql,
+  releaseNumberBlockInTx,
   reserveNumberBlockInTx,
+  takenNumbersIn,
 } from './syncService.js';
 import { ensureStoreSyncState, newSyncHint } from './syncRevision.js';
 import { assertDeviceSawWipe, storeWipeState } from './storeWipe.js';
@@ -219,24 +221,7 @@ export async function deviceFloors(client, storePk, deviceNo) {
  * too, read from the code or from fy_serial -- so a number reported free is free.
  */
 export async function takenNumbers(client, storePk, kind, fy, ranges = []) {
-  const k = kind === 'sales' ? 'sales' : 'purchases';
-  const dateCol = k === 'sales' ? 'bill_date' : 'purchase_date';
-  const params = [storePk, Number(fy), `${fy}-04-01`, `${Number(fy) + 1}-03-31`];
-  const cols = ranges.map(([lo, hi], i) => {
-    params.push(Number(lo), Number(hi));
-    const p = `$${params.length - 1} AND $${params.length}`;
-    return `GREATEST(COALESCE(MAX(a) FILTER (WHERE a BETWEEN ${p}), 0),
-                     COALESCE(MAX(b) FILTER (WHERE b BETWEEN ${p}), 0)) AS r${i}`;
-  });
-  const { rows } = await client.query(
-    `SELECT GREATEST(COALESCE(MAX(a), 0), COALESCE(MAX(b), 0)) AS head${cols.map((c) => `,
-            ${c}`).join('')}
-       FROM (SELECT ${billSerialColumns(k)} FROM ${k}
-              WHERE store_pk=$1 AND (fy_start_year = $2 OR (${dateCol} >= $3 AND ${dateCol} <= $4))) s`,
-    params,
-  );
-  const row = rows[0] || {};
-  return { head: Number(row.head || 0), ranges: ranges.map((_, i) => Number(row[`r${i}`] || 0)) };
+  return takenNumbersIn(client, storePk, kind, fy, ranges);
 }
 
 const MAX_HEAD_RANGES = 10;
@@ -258,24 +243,61 @@ function parseRanges(raw) {
 
 /**
  * GET /number-head: can a device still print the numbers left in its blocks? It sends the part
- * of each block it has not printed yet (sales=51-200&purchases=11-50); `taken` above 0 means
- * some other bill already holds a number in there (a data import, a restored backup), so the
- * device drops that block and reserves a fresh one, which starts after every number issued.
+ * of each block it has not printed yet (sales=51-200&purchases=11-50); `taken` above 0 means the
+ * device must drop that block and reserve a fresh one, which starts after every number issued:
+ *   * some other bill already holds a number in there (a data import, a restored backup);
+ *   * no block on the server holds those numbers any more (given back: its device was not seen
+ *     for BLOCK_HOLD_DAYS days, or the store's numbers were put right), so they may go to
+ *     anyone -- taken is then the range's end;
+ *   * the block is not started yet and numbers before it are free -- printing from it would
+ *     leave a gap in the book (a block reserved behind another device's block whose device
+ *     has gone) -- taken is the range's end too.
  * `head` is the highest number of the year on the server. Read-only.
  */
-export async function numberHead(storePk, { fyStartYear, sales, purchases } = {}) {
+export async function numberHead(storePk, { fyStartYear, sales, purchases } = {}, db = { query }) {
   const fy = Number(fyStartYear);
   if (!Number.isInteger(fy) || fy < 2000 || fy > 2100) throw new AppError(400, 'fy required (e.g. 2026)');
   const out = { fy_start_year: fy };
   const asked = { sales: parseRanges(sales), purchases: parseRanges(purchases) };
   for (const kind of ['sales', 'purchases']) {
-    const r = await takenNumbers({ query }, storePk, kind, fy, asked[kind]);
+    const r = await takenNumbers(db, storePk, kind, fy, asked[kind]);
+    const taken = [...r.ranges];
+    if (asked[kind].length) {
+      const { rows: blocks } = await db.query(
+        `SELECT nb.from_serial, nb.to_serial, ${heldBlockSql()} AS held FROM number_blocks nb
+          WHERE nb.store_pk=$1 AND nb.kind=$2 AND nb.fy_start_year=$3`,
+        [storePk, kind, fy],
+      );
+      for (let i = 0; i < asked[kind].length; i++) {
+        const [lo, hi] = asked[kind][i];
+        const own = blocks.find((b) => Number(b.from_serial) <= lo && Number(b.to_serial) >= hi);
+        if (!own) {
+          taken[i] = Math.max(taken[i], hi);
+          continue;
+        }
+        if (lo !== Number(own.from_serial) || taken[i] > 0 || lo <= 1) continue;
+        const heldBelow = Math.max(0, ...blocks
+          .filter((b) => b.held && Number(b.to_serial) < lo)
+          .map((b) => Number(b.to_serial)));
+        const { ranges: [billsBelow] } = await takenNumbers(db, storePk, kind, fy, [[1, lo - 1]]);
+        if (lo > Math.max(heldBelow, billsBelow) + 1) taken[i] = hi;
+      }
+    }
     out[kind] = {
       head: r.head,
-      ranges: asked[kind].map(([lo, hi], i) => ({ from: lo, to: hi, taken: r.ranges[i] })),
+      ranges: asked[kind].map(([lo, hi], i) => ({ from: lo, to: hi, taken: taken[i] })),
     };
   }
   return out;
+}
+
+/** POST /number-block/release: this device dropped a block (numbers.drop_taken on the PC). */
+export async function releaseNumberBlock(storePk, { installId, kind, fyStartYear, fromSerial, nextSerial, pairedId = null } = {}) {
+  const dev = await deviceRow(storePk, installId, { pairedId });
+  if (!['sales', 'purchases'].includes(kind)) throw new AppError(400, 'kind must be sales|purchases');
+  return withTransaction((client) => releaseNumberBlockInTx(client, storePk, {
+    kind, fyStartYear, deviceNo: dev.device_no, fromSerial, nextSerial,
+  }));
 }
 
 export async function reserveNumberBlock(storePk, { installId, kind, fyStartYear, size, pairedId = null } = {}) {

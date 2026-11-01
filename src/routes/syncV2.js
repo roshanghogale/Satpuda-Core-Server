@@ -11,6 +11,7 @@ import {
   numberHead,
   pushEvents,
   registerDevice,
+  releaseNumberBlock,
   reserveNumberBlock,
   resolveFlag,
   stockNow,
@@ -38,6 +39,19 @@ router.post('/number-block', asyncHandler(async (req, res) => {
     kind: b.kind,
     fyStartYear: b.fy_start_year,
     size: b.size,
+    pairedId: req.auth?.deviceId,
+  }));
+}));
+
+/** The device dropped one of its blocks: the numbers it did not print go back. */
+router.post('/number-block/release', asyncHandler(async (req, res) => {
+  const b = req.body || {};
+  ok(res, await releaseNumberBlock(await resolveStorePk(req), {
+    installId: b.install_id,
+    kind: b.kind,
+    fyStartYear: b.fy_start_year,
+    fromSerial: b.from_serial,
+    nextSerial: b.next_serial,
     pairedId: req.auth?.deviceId,
   }));
 }));

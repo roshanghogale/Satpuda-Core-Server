@@ -3121,19 +3121,140 @@ async function maxExistingFySerial(client, storePk, kind, fy, excludeLocalId = n
   return Math.max(maxSerial, await maxReservedSerial(client, storePk, kind, fy));
 }
 
+/**
+ * A number block is HELD while its device is about: seen by the server in the last
+ * BLOCK_HOLD_DAYS days, or reserved in the last day. Only held blocks keep numbers back.
+ * A block whose device has gone (a PC used to set the store up, an install whose id changed,
+ * a reinstalled PC) used to keep its numbers back for ever, and every number after it -- the
+ * shop's next bill, the next block -- came after it: stores loaded from another program's
+ * backup (145, 149, 151, 154, Oct 2026) had gaps of 50 to 200 numbers in their bill and
+ * purchase books. Such a block is released (releaseStaleBlocks) when a number is next handed
+ * out; if its device comes back, number-head tells it the block is gone and it reserves anew.
+ */
+export const BLOCK_HOLD_DAYS = 3;
+const HELD_BLOCK_SQL = `(nb.created_at > NOW() - INTERVAL '1 day' OR EXISTS (
+    SELECT 1 FROM sync_devices d
+     WHERE d.store_pk = nb.store_pk AND d.device_no = nb.device_no
+       AND d.last_seen_at > NOW() - INTERVAL '${BLOCK_HOLD_DAYS} days'))`;
+export const heldBlockSql = () => HELD_BLOCK_SQL;
+
 let _numberBlocksReady = false;
-async function maxReservedSerial(client, storePk, kind, fy) {
+async function numberBlocksReady(client) {
   if (!_numberBlocksReady) {
     const { rows } = await client.query(`SELECT to_regclass('public.number_blocks') IS NOT NULL AS ok`);
-    if (!rows[0]?.ok) return 0;
+    if (!rows[0]?.ok) return false;
     _numberBlocksReady = true;
   }
+  return true;
+}
+
+async function maxReservedSerial(client, storePk, kind, fy) {
+  if (!(await numberBlocksReady(client))) return 0;
   const { rows } = await client.query(
-    `SELECT COALESCE(MAX(to_serial), 0) AS m FROM number_blocks
-      WHERE store_pk=$1 AND kind=$2 AND fy_start_year=$3`,
+    `SELECT COALESCE(MAX(nb.to_serial), 0) AS m FROM number_blocks nb
+      WHERE nb.store_pk=$1 AND nb.kind=$2 AND nb.fy_start_year=$3 AND ${HELD_BLOCK_SQL}`,
     [storePk, kind === 'sales' ? 'sales' : 'purchases', Number(fy)],
   );
   return Number(rows[0]?.m || 0);
+}
+
+/**
+ * The numbers a store already holds in one financial year's book: `head`, the highest number
+ * any bill of the year holds, and for each [from, to] the highest held inside it (0 when none).
+ * Every row counts -- deleted and draft bills too, read from the code or from fy_serial.
+ */
+export async function takenNumbersIn(client, storePk, kind, fy, ranges = []) {
+  const k = kind === 'sales' ? 'sales' : 'purchases';
+  const dateCol = k === 'sales' ? 'bill_date' : 'purchase_date';
+  const params = [storePk, Number(fy), `${fy}-04-01`, `${Number(fy) + 1}-03-31`];
+  const cols = ranges.map(([lo, hi], i) => {
+    params.push(Number(lo), Number(hi));
+    const p = `$${params.length - 1} AND $${params.length}`;
+    return `GREATEST(COALESCE(MAX(a) FILTER (WHERE a BETWEEN ${p}), 0),
+                     COALESCE(MAX(b) FILTER (WHERE b BETWEEN ${p}), 0)) AS r${i}`;
+  });
+  const { rows } = await client.query(
+    `SELECT GREATEST(COALESCE(MAX(a), 0), COALESCE(MAX(b), 0)) AS head${cols.map((c) => `,
+            ${c}`).join('')}
+       FROM (SELECT ${billSerialColumns(k)} FROM ${k}
+              WHERE store_pk=$1 AND (fy_start_year = $2 OR (${dateCol} >= $3 AND ${dateCol} <= $4))) s`,
+    params,
+  );
+  const row = rows[0] || {};
+  return { head: Number(row.head || 0), ranges: ranges.map((_, i) => Number(row[`r${i}`] || 0)) };
+}
+
+/**
+ * Give back the numbers of blocks no longer held (HELD_BLOCK_SQL): each is cut back to the
+ * highest number a bill holds in it, or removed when none does. Called under the year's lock
+ * before a number or a block is handed out.
+ */
+export async function releaseStaleBlocks(client, storePk, kind, fy) {
+  if (!(await numberBlocksReady(client))) return [];
+  const k = kind === 'sales' ? 'sales' : 'purchases';
+  const { rows } = await client.query(
+    `SELECT nb.id, nb.device_no, nb.from_serial, nb.to_serial FROM number_blocks nb
+      WHERE nb.store_pk=$1 AND nb.kind=$2 AND nb.fy_start_year=$3 AND NOT ${HELD_BLOCK_SQL}
+      ORDER BY nb.from_serial`,
+    [storePk, k, Number(fy)],
+  );
+  if (!rows.length) return [];
+  const out = [];
+  for (let i = 0; i < rows.length; i += 10) {
+    const part = rows.slice(i, i + 10);
+    const { ranges } = await takenNumbersIn(
+      client, storePk, k, fy, part.map((b) => [Number(b.from_serial), Number(b.to_serial)]),
+    );
+    for (let j = 0; j < part.length; j++) {
+      const b = part[j];
+      const used = ranges[j];
+      if (used >= Number(b.from_serial)) {
+        if (used < Number(b.to_serial)) {
+          await client.query('UPDATE number_blocks SET to_serial=$2 WHERE id=$1', [b.id, used]);
+          out.push({ ...b, to_serial: used });
+        }
+      } else {
+        await client.query('DELETE FROM number_blocks WHERE id=$1', [b.id]);
+        out.push({ ...b, to_serial: null });
+      }
+    }
+  }
+  if (out.length) {
+    console.log(`[numbers] store ${storePk} ${k} ${fy}: released ${out.length} block(s) of devices not seen for ${BLOCK_HOLD_DAYS} days`);
+  }
+  return out;
+}
+
+/**
+ * A device gives back the numbers left in one of its blocks (it dropped the block: the server
+ * said they were taken, or it would leave a gap). The block is cut back to before `nextSerial`,
+ * or removed when nothing of it was printed.
+ */
+export async function releaseNumberBlockInTx(client, storePk, { kind, fyStartYear, deviceNo, fromSerial, nextSerial }) {
+  const k = kind === 'sales' ? 'sales' : 'purchases';
+  const fy = Number(fyStartYear);
+  const from = Number(fromSerial);
+  const next = Number(nextSerial);
+  if (!Number.isInteger(fy) || fy < 2000 || fy > 2100) throw new AppError(400, 'fy_start_year required');
+  if (!Number.isInteger(from) || from < 1 || !Number.isInteger(next) || next < from) {
+    throw new AppError(400, 'from_serial and next_serial required (next_serial >= from_serial)');
+  }
+  await lockFySeries(client, storePk, k, fy);
+  const { rows } = await client.query(
+    `SELECT id, to_serial FROM number_blocks
+      WHERE store_pk=$1 AND kind=$2 AND fy_start_year=$3 AND device_no=$4 AND from_serial=$5`,
+    [storePk, k, fy, Number(deviceNo), from],
+  );
+  if (!rows.length) return { released: false };
+  // Never below a number a bill already holds in it (printed while the question was out).
+  const { ranges: [used] } = await takenNumbersIn(client, storePk, k, fy, [[from, Number(rows[0].to_serial)]]);
+  const keep = Math.max(next - 1, used);
+  if (keep < from) {
+    await client.query('DELETE FROM number_blocks WHERE id=$1', [rows[0].id]);
+  } else if (keep < Number(rows[0].to_serial)) {
+    await client.query('UPDATE number_blocks SET to_serial=$2 WHERE id=$1', [rows[0].id, keep]);
+  }
+  return { released: true, kind: k, fy_start_year: fy, from_serial: from, to_serial: keep >= from ? keep : null };
 }
 
 /**
@@ -3162,6 +3283,7 @@ export async function reserveNumberBlockInTx(client, storePk, { kind, fyStartYea
   if (!Number.isFinite(fy) || fy < 2000 || fy > 2100) throw new AppError(400, 'fy_start_year required');
   const n = Math.max(5, Math.min(200, Number(size) || 50));
   await lockFySeries(client, storePk, k, fy);
+  await releaseStaleBlocks(client, storePk, k, fy);
   const top = await maxExistingFySerial(client, storePk, k, fy);
   const from = top + 1;
   const to = top + n;
@@ -3234,6 +3356,7 @@ async function reallocateSerialForFy(client, storePk, kind, fy, excludeLocalId) 
   // just been handed could be the same, and the two paths disagreed on what "next" was
   // (a phone could adopt a third number the store did not hold).
   await lockFySeries(client, storePk, kind, year);
+  await releaseStaleBlocks(client, storePk, kind, year);
   const serial = (await maxExistingFySerial(client, storePk, kind, year, excludeLocalId)) + 1;
   await client.query(
     `INSERT INTO fy_serials (store_pk, kind, fy_start_year, last_serial)
@@ -3263,6 +3386,7 @@ export async function allocateFySerial(storePk, kind, dateValue) {
 export async function allocateFySerialInTx(client, storePk, kind, dateValue) {
   const fy = fyStartYearForDate(dateValue);
   await lockFySeries(client, storePk, kind, fy);
+  await releaseStaleBlocks(client, storePk, kind, fy);
   const dataMax = await maxExistingFySerial(client, storePk, kind, fy);
   // Next number is max(LIVE bills)+1, so deleting the latest bill hands its
   // number straight back to the next one. Safe only with the partial indexes.
